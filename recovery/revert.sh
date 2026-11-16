@@ -26,10 +26,12 @@ if [[ -n $loaded ]]; then
     exit 1
   fi
 fi
-if ! modprobe wl; then
-  modprobe cfg80211
-  insmod "$bundle/backup/wl.ko"
-fi
+depends=$(modinfo -F depends "$bundle/backup/wl.ko")
+IFS=, read -r -a dependencies <<< "$depends"
+for dependency in "${dependencies[@]}"; do
+  modprobe "$dependency"
+done
+insmod "$bundle/backup/wl.ko"
 loaded=$(cat "$sysroot/module/wl/srcversion" 2>/dev/null || true)
 if [[ $loaded != "$saved_version" ]]; then
   printf 'Stock driver identity differs. Reboot to restore the installed driver.\n' >&2

@@ -1206,7 +1206,7 @@ static struct {
 	struct delayed_work saq_chk;   /* SA-Query retry / timeout */
 	u8  dd_frame[96];
 	unsigned int dd_len;
-	bool dd_busy, dd_prot;
+	bool dd_busy;
 	int  dd_kind;                  /* 0 = captured frame, 1 = liveness probe (after resume) */
 	bool saq_pending;
 	u16  saq_tid;
@@ -1426,6 +1426,8 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	if (wl_sae.inited) {
 		cancel_work_sync(&wl_sae.saq_work);
 		cancel_work_sync(&wl_sae.dd_work);
+		wl_sae.saq_busy = false;
+		wl_sae.dd_busy = false;
 	}
 	wl_bip_reset();
 	if (sme->ie && sme->ie_len) {
@@ -2755,9 +2757,9 @@ out_req:
 	return ret;
 }
 
-static int wl_re_ccm(bool enc, const u8 *nonce, const u8 *aad, unsigned aadlen, u8 *data, unsigned dlen)
+static int wl_re_ccm(const u8 *nonce, const u8 *aad, unsigned aadlen, u8 *data, unsigned dlen)
 {
-	return wl_re_ccm_with(wl_saq_tfm, GFP_KERNEL, enc, nonce, aad, aadlen, data, dlen);
+	return wl_re_ccm_with(wl_saq_tfm, GFP_KERNEL, true, nonce, aad, aadlen, data, dlen);
 }
 
 /* ===== Block Ack (ADDBA/DELBA) through PMF =====
@@ -2822,20 +2824,6 @@ static void wl_re_crypto_exit(void)
 	}
 }
 
-/* atomic-context AES-CCM with the synchronous tfm; dlen <= 48 */
-static int wl_re_ccm_fast(bool enc, const u8 *nonce, const u8 *aad, u8 *data, unsigned dlen)
-{
-	unsigned long fl;
-	int ret;
-
-	if (dlen > 48)
-		return -EMSGSIZE;
-	spin_lock_irqsave(&wl_re_fast_lock, fl);
-	ret = wl_re_fast_ok ? wl_re_ccm_with(wl_re_fast_tfm, GFP_ATOMIC, enc, nonce, aad, 22, data, dlen) : -ENOKEY;
-	spin_unlock_irqrestore(&wl_re_fast_lock, fl);
-	return ret;
-}
-
 static int wl_re_ccm_fast_tx(const u8 *header, u8 pn[6], u8 *data, unsigned int len)
 {
 	unsigned long flags;
@@ -2864,41 +2852,51 @@ static inline u64 wl_re_ccmp_pn(const u8 *p)   /* PN from the 8-byte CCMP header
 	return (u64)p[0] | (u64)p[1] << 8 | (u64)p[4] << 16 | (u64)p[5] << 24 | (u64)p[6] << 32 | (u64)p[7] << 40;
 }
 
-/* RX, atomic context. skb->data + q = protected action frame from the AP (24B header, CCMP header,
- * ciphertext, MIC, FCS). Returns 1 if it was a Block-Ack frame and the skb now holds the same frame
- * unprotected and in plaintext (hand it to the blob), -1 to drop it, 0 if it is not for us. */
-static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
+static int wl_re_mgmt_rx(struct sk_buff *skb, unsigned int q)
 {
 	u8 *p = skb->data + q;
 	unsigned int flen = skb->len - q;
-	u8 nonce[13], aad[22], pn[6], pt[56];
+	u8 nonce[13], aad[22], pn[6], pt[68];
 	int ctlen = (int)flen - 4 - 24 - 8 - 8;
-	u64 pn64;
-	int epoch = atomic_read(&wl_key_epoch);
+	unsigned long flags;
+	int epoch, ret = -1;
 
-	if (re_pmf_ba < 2 || !wl_sae.tk_set || ctlen < 4 || ctlen > 48 || !(p[27] & 0x20) ||
-	    memcmp(p + 16, wl_sae.bssid, 6) != 0)
-		return 0;
-	pn[0] = p[24]; pn[1] = p[25]; pn[2] = p[28]; pn[3] = p[29]; pn[4] = p[30]; pn[5] = p[31];
+	if (ctlen < 2 || ctlen > 60 || p[26] || p[27] != (0x20 | (wl_sae.tk_key_idx << 6)))
+		return -1;
+	pn[0] = p[24]; pn[1] = p[25]; pn[2] = p[28];
+	pn[3] = p[29]; pn[4] = p[30]; pn[5] = p[31];
 	wl_re_ccmp_blocks(p, pn, nonce, aad);
 	memcpy(pt, p + 32, ctlen + 8);
-	if (wl_re_ccm_fast(false, nonce, aad, pt, ctlen) != 0 || pt[0] != 3)
-		return 0;                       /* not decryptable here, or not Block Ack: SA-Query path */
-	pn64 = wl_re_ccmp_pn(p + 24);
-	if (!wl_mgmt_replay_accept(pn64, epoch)) {
-		return -1;
-	}
+	spin_lock_irqsave(&wl_re_fast_lock, flags);
+	epoch = atomic_read(&wl_key_epoch);
+	if (wl_re_fast_ok && wl_sae.tk_set &&
+	    !wl_re_ccm_with(wl_re_fast_tfm, GFP_ATOMIC, false, nonce, aad, 22, pt, ctlen) &&
+	    wl_mgmt_replay_accept(wl_re_ccmp_pn(p + 24), epoch))
+		ret = 0;
+	spin_unlock_irqrestore(&wl_re_fast_lock, flags);
+	if (ret)
+		return ret;
+	memcpy(p + 24, pt, ctlen);
+	memmove(p + 24 + ctlen, p + flen - 4, 4);
+	p[1] &= ~0x40;
+	skb_trim(skb, q + 24 + ctlen + 4);
+	return 0;
+}
+
+static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
+{
+	u8 *p = skb->data + q;
+	int ctlen = (int)(skb->len - q) - 24 - 4;
+
+	if (re_pmf_ba < 2 || ctlen < 4 || ctlen > 48 || p[24] != 3)
+		return 0;
 	if (re_verbose) {
 		u16 st = q >= 6 ? skb->data[4] | (skb->data[5] << 8) : 0;
 
 		re_log("re ba: AP %s token=%02x rxstatus1=0x%04x -> blob\n",
-		       pt[1] == 0 ? "ADDBA req" : pt[1] == 1 ? "ADDBA resp" : pt[1] == 2 ? "DELBA" : "BA action",
-		       pt[2], st);
+		       p[25] == 0 ? "ADDBA req" : p[25] == 1 ? "ADDBA resp" : p[25] == 2 ? "DELBA" : "BA action",
+		       p[26], st);
 	}
-	memcpy(p + 24, pt, ctlen);
-	memmove(p + 24 + ctlen, p + flen - 4, 4);       /* keep the FCS bytes */
-	p[1] &= ~0x40;                                  /* no longer protected */
-	skb_trim(skb, q + 24 + ctlen + 4);
 	if (re_ba_rxclr && q >= 6) {
 		u16 st = skb->data[4] | (skb->data[5] << 8);
 
@@ -2961,8 +2959,6 @@ int __wrap_wlc_sendmgmt(void *wlc, void *pkt, void *txq, void *scb, long a5, lon
 	return wlc_sendmgmt(wlc, pkt, txq, scb, a5, a6);
 }
 
-/* Deferred (process-context) handler: SW-decrypt the captured protected action frame; if it is
- * an SA-Query Request, build + SW-encrypt + TX a protected SA-Query Response. */
 extern int wl_re_mgmt_tx(struct net_device *dev, const unsigned char *f, int flen, void *scb);
 extern void *wl_re_find_scb(struct net_device *dev, const unsigned char *mac);
 static int wl_re_tx_prot_locked(struct net_device *dev, u8 fc0, const u8 *body, unsigned int blen);
@@ -2970,30 +2966,15 @@ static void wl_re_saq_work(struct work_struct *w)
 {
 	u8 *f = wl_sae.saq_frame;
 	unsigned int flen = wl_sae.saq_len;
-	u8 nonce[13], aad[22], pn[6], body[72];
-	int ctlen;
-	int epoch;
+	const u8 *body = f + 24;
+	int ctlen = (int)flen - 24 - 4;
 	bool locked = false;
 
-	if (!wl_sae.tk_set || !wl_sae.dev || flen < 24 + 8 + 8 + 4 + 4)
+	if (!wl_sae.tk_set || !wl_sae.dev || ctlen < 4 || ctlen > 60)
 		goto done;
 	mutex_lock(&wl_saq_lock);
 	locked = true;
-	epoch = atomic_read(&wl_key_epoch);
 	if (wl_re_ccm_setup())
-		goto done;
-	ctlen = (int)flen - 4 /*FCS*/ - 24 - 8 - 8;
-	if (ctlen <= 0 || ctlen > 60)
-		goto done;
-	pn[0] = f[24]; pn[1] = f[25]; pn[2] = f[28];
-	pn[3] = f[29]; pn[4] = f[30]; pn[5] = f[31];
-	wl_re_ccmp_blocks(f, pn, nonce, aad);
-	memcpy(body, f + 32, ctlen + 8);   /* ct + MIC */
-	if (wl_re_ccm(false, nonce, aad, 22, body, ctlen) != 0) {
-		re_log("re saq: CCMP decrypt FAILED (ctlen=%d)\n", ctlen);
-		goto done;
-	}
-	if (!wl_mgmt_replay_accept(wl_re_ccmp_pn(f + 24), epoch))
 		goto done;
 	re_log("re saq: decrypted action cat=%u act=%u transid=%02x%02x ctlen=%d\n",
 	       body[0], body[1], ctlen >= 4 ? body[2] : 0, ctlen >= 4 ? body[3] : 0, ctlen);
@@ -3028,7 +3009,7 @@ static void wl_re_saq_work(struct work_struct *w)
 		rpn[3] = (txpn >> 24) & 0xff; rpn[4] = (txpn >> 32) & 0xff; rpn[5] = (txpn >> 40) & 0xff;
 		wl_re_ccmp_blocks(rh, rpn, rnonce, raad);
 		pt[0] = 8; pt[1] = 1; pt[2] = body[2]; pt[3] = body[3];   /* cat8 action1 transid */
-		if (wl_re_ccm(true, rnonce, raad, 22, pt, 4) != 0) {
+		if (wl_re_ccm(rnonce, raad, 22, pt, 4) != 0) {
 			re_log("re saq: CCMP encrypt FAILED\n");
 			goto done;
 		}
@@ -3068,7 +3049,7 @@ static int wl_re_tx_prot_locked(struct net_device *dev, u8 fc0, const u8 *body, 
 	pn[3] = (txpn >> 24) & 0xff; pn[4] = (txpn >> 32) & 0xff; pn[5] = (txpn >> 40) & 0xff;
 	wl_re_ccmp_blocks(rh, pn, nonce, aad);
 	memcpy(pt, body, blen);
-	rc = wl_re_ccm(true, nonce, aad, 22, pt, blen);     /* -> blen bytes ciphertext + 8 bytes MIC */
+	rc = wl_re_ccm(nonce, aad, 22, pt, blen);     /* -> blen bytes ciphertext + 8 bytes MIC */
 	if (rc)
 		return rc;
 	memcpy(frame, rh, 24);
@@ -3249,10 +3230,6 @@ static void wl_re_dd_work(struct work_struct *w)
 	struct net_device *dev = wl_sae.dev;
 	u8 *f = wl_sae.dd_frame;
 	unsigned int flen = wl_sae.dd_len;
-	u8 nonce[13], aad[22], pn[6], buf[2 + 8];
-	u64 pn64;
-	int epoch;
-	bool locked = false;
 	u16 reason;
 
 	if (!dev || !wl_sae.pmf_active)
@@ -3269,41 +3246,13 @@ static void wl_re_dd_work(struct work_struct *w)
 		goto done;
 	if (wl_sae.dd_kind == 3) {
 		reason = f[24] | (f[25] << 8);
-		wl_re_assoc_lost(dev, reason, "BIP-verified group deauth/disassoc");
+		wl_re_assoc_lost(dev, reason, "authenticated deauth/disassoc");
 		goto done;
 	}
-	if (!wl_sae.dd_prot) {
-		reason = f[24] | (f[25] << 8);
-		if (reason == 6 || reason == 7)
-			wl_re_saq_start(dev, "unprotected class 2/3 deauth");
-		goto done;
-	}
-	/* protected deauth/disassoc: CCMP hdr(8) + reason(2) + MIC(8) after the 24-byte header */
-	if (!wl_sae.tk_set || flen < 24 + 8 + 2 + 8)
-		goto done;
-	pn[0] = f[24]; pn[1] = f[25]; pn[2] = f[28]; pn[3] = f[29]; pn[4] = f[30]; pn[5] = f[31];
-	pn64 = (u64)pn[0] | ((u64)pn[1] << 8) | ((u64)pn[2] << 16) | ((u64)pn[3] << 24) |
-	       ((u64)pn[4] << 32) | ((u64)pn[5] << 40);
-	mutex_lock(&wl_saq_lock);
-	locked = true;
-	epoch = atomic_read(&wl_key_epoch);
-	if (wl_re_ccm_setup())
-		goto done;
-	wl_re_ccmp_blocks(f, pn, nonce, aad);
-	memcpy(buf, f + 32, 2 + 8);
-	if (wl_re_ccm(false, nonce, aad, 22, buf, 2) != 0) {
-		re_log("re: protected deauth/disassoc: CCMP verify FAILED -> ignored\n");
-		goto done;
-	}
-	if (!wl_mgmt_replay_accept(pn64, epoch))
-		goto done;
-	reason = buf[0] | (buf[1] << 8);
-	mutex_unlock(&wl_saq_lock);
-	locked = false;
-	wl_re_assoc_lost(dev, reason, f[0] == 0xc0 ? "protected deauth from AP" : "protected disassoc from AP");
+	reason = f[24] | (f[25] << 8);
+	if (reason == 6 || reason == 7)
+		wl_re_saq_start(dev, "unprotected class 2/3 deauth");
 done:
-	if (locked)
-		mutex_unlock(&wl_saq_lock);
 	wl_sae.dd_busy = false;
 }
 /* ===== end SW CCMP / SA-Query ===== */
@@ -3374,7 +3323,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 			unsigned char fc0 = skb->data[q], fc1 = skb->data[q + 1];
 			const u8 *f = skb->data + q;
 			size_t flen = skb->len - q - 4;
-			bool robust;
+			bool robust, verified = false;
 			if (flen < 25)
 				goto drop;
 			robust = _ieee80211_is_robust_mgmt_frame((struct ieee80211_hdr *)f);
@@ -3400,7 +3349,15 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 				}
 				goto pass;
 			}
-			if (robust && fc0 == 0xd0 && !(fc1 & 0x40) &&
+			if ((fc0 == 0xc0 || fc0 == 0xa0 || fc0 == 0xd0) &&
+			    (fc1 & 0x40) && !memcmp(f + 4, me, 6)) {
+				if (memcmp(f + 10, ap, 6) || memcmp(f + 16, ap, 6) ||
+				    !wl_sae.tk_set || wl_re_mgmt_rx(skb, q))
+					goto drop;
+				verified = true;
+				fc1 &= ~0x40;
+			}
+			if (robust && fc0 == 0xd0 && !verified && !(fc1 & 0x40) &&
 			    !memcmp(f + 4, me, 6))
 				goto drop;
 			if ((fc0 == 0xc0 || fc0 == 0xa0) &&                       /* deauth / disassoc */
@@ -3408,7 +3365,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 			    memcmp(skb->data + q + 16, ap, 6) == 0 &&             /* BSSID = AP */
 			    (memcmp(skb->data + q + 4, me, 6) == 0 ||
 			     (skb->data[q + 4] & 1))) {                           /* DA = us or mcast */
-				if ((fc1 & 0x40) == 0) {                             /* Protected-Frame bit clear */
+				if (!verified) {
 					unsigned int fl = skb->len - q;
 					unsigned int rsn = q + 26 <= skb->len ? skb->data[q + 24] | (skb->data[q + 25] << 8) : 0;
 					re_log("re pmf: DROP unprotected %s from AP, reason %u (spoofed-deauth defense)\n",
@@ -3418,7 +3375,6 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 					if ((rsn == 6 || rsn == 7) && !wl_sae.dd_busy && fl <= sizeof(wl_sae.dd_frame)) {
 						memcpy(wl_sae.dd_frame, skb->data + q, fl);
 						wl_sae.dd_len = fl;
-						wl_sae.dd_prot = false;
 						wl_sae.dd_kind = 0;
 						wl_sae.dd_busy = true;
 						schedule_work(&wl_sae.dd_work);
@@ -3426,55 +3382,27 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 					wl_re_pktfree(wl_sae.dev, pkt, false);
 					return;
 				}
-				{
-					unsigned int fl = skb->len - q;
-					re_log("re pmf: PROTECTED %s from AP (len %u) -> verifying in software\n",
-					       fc0 == 0xc0 ? "deauth" : "disassoc", fl);
-					/* the blob cannot decrypt management frames: verify + honour it ourselves */
-					if (!wl_sae.dd_busy && wl_sae.tk_set && fl <= sizeof(wl_sae.dd_frame)) {
-						memcpy(wl_sae.dd_frame, skb->data + q, fl);
-						wl_sae.dd_len = fl;
-						wl_sae.dd_prot = true;
-						wl_sae.dd_kind = 0;
-						wl_sae.dd_busy = true;
-						schedule_work(&wl_sae.dd_work);
-					}
+				if (!wl_sae.dd_busy) {
+					memcpy(wl_sae.dd_frame, f, 26);
+					wl_sae.dd_len = 26;
+					wl_sae.dd_kind = 3;
+					wl_sae.dd_busy = true;
+					schedule_work(&wl_sae.dd_work);
 				}
-				break;
+				goto drop;
 			}
-			/* A protected ACTION frame from the AP -> likely an 802.11w SA-Query Request the
-			 * blob can't decrypt. Copy it out and hand to the deferred SW-CCMP responder
-			 * (crypto can sleep; the RX path is atomic), then CONSUME it so the blob doesn't
-			 * answer with an action-error. */
-			if (fc0 == 0xd0 && (fc1 & 0x40) &&                        /* action, protected */
-			    memcmp(skb->data + q + 10, ap, 6) == 0 &&             /* SA = AP */
-			    memcmp(skb->data + q + 4, me, 6) == 0 &&              /* DA = us */
-			    wl_sae.tk_set && re_pmf_ba >= 2) {
-				/* Block Ack (ADDBA/DELBA): decrypt here and let the blob process it as if it had
-				 * arrived unprotected, so a Block-Ack agreement (frame aggregation) can be set up. */
-				int ba = wl_re_ba_rx(skb, q);
-
-				if (ba > 0)
-					goto pass;
-				if (ba < 0) {
-						wl_re_pktfree(wl_sae.dev, pkt, false);
-					return;
-				}
-			}
-			if (fc0 == 0xd0 && (fc1 & 0x40) &&                        /* action, protected */
-			    memcmp(skb->data + q + 10, ap, 6) == 0 &&             /* SA = AP */
-			    memcmp(skb->data + q + 4, me, 6) == 0 &&              /* DA = us */
-			    wl_sae.tk_set && !wl_sae.saq_busy) {
+			if (fc0 == 0xd0 && verified) {
 				unsigned int fl = skb->len - q;
-				if (fl <= sizeof(wl_sae.saq_frame)) {
-					memcpy(wl_sae.saq_frame, skb->data + q, fl);
+
+				if (wl_re_ba_rx(skb, q))
+					goto pass;
+				if (!wl_sae.saq_busy && fl <= sizeof(wl_sae.saq_frame)) {
+					memcpy(wl_sae.saq_frame, f, fl);
 					wl_sae.saq_len = fl;
 					wl_sae.saq_busy = true;
 					schedule_work(&wl_sae.saq_work);
-					re_log("re saq: queued protected action (len=%u) for SW decrypt\n", fl);
-						wl_re_pktfree(wl_sae.dev, pkt, false);
-					return;
 				}
+				goto drop;
 			}
 		}
 	}
@@ -4585,6 +4513,8 @@ void wl_cfg80211_detach(struct net_device *ndev)
 		cancel_delayed_work_sync(&wl_sae.hs_wd);
 		cancel_work_sync(&wl_sae.saq_work);
 		cancel_work_sync(&wl_sae.dd_work);
+		wl_sae.saq_busy = false;
+		wl_sae.dd_busy = false;
 	}
 	wl_re_crypto_exit();
 	wl_bip_reset();

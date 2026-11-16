@@ -23,7 +23,12 @@ with (state / "calls").open("a", encoding="utf-8") as log:
     log.write(json.dumps([name] + args) + "\n")
 if name == "id": print("0")
 elif name == "uname": print("test-kernel")
-elif name == "modinfo": print("test-kernel SMP " if "vermagic" in args else "stock-version")
+elif name == "modinfo":
+    if "depends" in args:
+        candidate = "candidate" in Path(args[-1]).parts
+        if candidate and os.environ.get("FAIL_MODINFO"): sys.exit(1)
+        print("cfg80211,aes_cbc_macs" if candidate else "cfg80211")
+    else: print("test-kernel SMP " if "vermagic" in args else "stock-version")
 elif name == "findmnt": print(state / "sys")
 elif name == "systemd-path": print(state / "run")
 elif name == "systemd-run":
@@ -35,13 +40,20 @@ elif name == "modprobe":
     if args == ["-r", "wl"]:
         if os.environ.get("FAIL_UNLOAD"): sys.exit(1)
         version.write_text("", encoding="utf-8")
+        (state / "dependencies").write_text("[]", encoding="utf-8")
     elif args == ["wl"]:
-        if os.environ.get("FAIL_STOCK"): sys.exit(1)
-        version.write_text("stock-version\n", encoding="utf-8")
+        version.write_text(os.environ.get("INSTALLED_VERSION", "stock-version") + "\n", encoding="utf-8")
+    else:
+        if args[0] == os.environ.get("FAIL_DEPENDENCY"): sys.exit(1)
+        dependencies = json.loads((state / "dependencies").read_text(encoding="utf-8"))
+        (state / "dependencies").write_text(json.dumps(dependencies + args), encoding="utf-8")
 elif name == "insmod":
     candidate = "candidate" in Path(args[0]).parts
     if candidate and os.environ.get("FAIL_LOAD"): sys.exit(1)
-    version.write_text("candidate-version\n" if candidate else "stock-version\n", encoding="utf-8")
+    required = {"cfg80211", "aes_cbc_macs"} if candidate else {"cfg80211"}
+    if not required.issubset(json.loads((state / "dependencies").read_text(encoding="utf-8"))): sys.exit(1)
+    restored = "wrong-version" if os.environ.get("WRONG_BACKUP") else "stock-version"
+    version.write_text("candidate-version\n" if candidate else restored + "\n", encoding="utf-8")
 else: raise AssertionError(name)
 ''', encoding="utf-8")
 dispatcher.chmod(0o700)
@@ -58,6 +70,7 @@ def case(name):
     for p in (bundle / "backup", bundle / "candidate", state / "sys/module/wl", state / "run", state / "home"):
         p.mkdir(parents=True)
     (state / "calls").write_text("", encoding="utf-8")
+    (state / "dependencies").write_text('["cfg80211"]', encoding="utf-8")
     for script in ("trial.sh", "revert.sh"):
         shutil.copy2(repo / "recovery" / script, bundle / script)
     (bundle / "backup/wl.ko").write_bytes(b"stock module")
@@ -70,7 +83,7 @@ def case(name):
     manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
     manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
     env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ["PATH"], TEST_STATE=str(state), HOME=str(state / "home"))
-    for key in ("FAIL_TIMER", "FAIL_LOAD", "FAIL_STOCK", "FAIL_UNLOAD"):
+    for key in ("FAIL_TIMER", "FAIL_LOAD", "FAIL_UNLOAD", "FAIL_DEPENDENCY", "FAIL_MODINFO", "INSTALLED_VERSION", "WRONG_BACKUP"):
         env.pop(key, None)
     return state, bundle, env
 
@@ -100,6 +113,7 @@ timer_args = json.loads((state / "timer_args").read_text(encoding="utf-8"))
 assert "--on-active=120s" in timer_args
 root_copy = Path(timer_args[-1])
 assert root_copy.parent.parent == state / "run"
+env["INSTALLED_VERSION"] = "updated-stock-version"
 result = subprocess.run(timer_args[-2:], env=env, text=True, capture_output=True, timeout=30)
 assert result.returncode == 0, result.stderr
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
@@ -112,11 +126,24 @@ env["FAIL_LOAD"] = "1"
 assert run(bundle, env).returncode != 0
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
 
-state, bundle, env = case("backup-fallback")
+state, bundle, env = case("changed-installed-version")
 (state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")
-env["FAIL_STOCK"] = "1"
+env["INSTALLED_VERSION"] = "updated-stock-version"
 assert run(bundle, env, "revert.sh").returncode == 0
 assert any(c[0] == "insmod" and "backup" in c[-1] for c in calls(state))
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+
+for flag in ("FAIL_DEPENDENCY", "FAIL_MODINFO"):
+    state, bundle, env = case(flag.lower())
+    env[flag] = "aes_cbc_macs" if flag == "FAIL_DEPENDENCY" else "1"
+    assert run(bundle, env).returncode != 0
+    assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+
+state, bundle, env = case("wrong-backup-identity")
+(state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")
+env["WRONG_BACKUP"] = "1"
+result = run(bundle, env, "revert.sh")
+assert result.returncode != 0 and "identity differs" in result.stderr
 
 state, bundle, env = case("tampered-module")
 (bundle / "candidate/wl.ko").write_bytes(b"corrupt")
@@ -129,7 +156,7 @@ manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
 manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
 assert run(bundle, env).returncode != 0
 assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
-print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, backup fallback, tamper and kernel mismatch passed")
+print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, changed installed version, dependency reload/failure, tamper and kernel mismatch passed")
 
 state, bundle, env = case("unload-failed")
 (state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")

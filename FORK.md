@@ -5,7 +5,7 @@ Local work only. No remote publication.
 
 | Upstream file | Change |
 | --- | --- |
-| wl-src/src/wl/sys/wl_cfg80211_hybrid.c | BIP-CMAC key lifecycle and RX verification |
+| wl-src/src/wl/sys/wl_cfg80211_hybrid.c | BIP-CMAC key lifecycle, ordered unicast RX verification and worker cancellation |
 | wl-src/src/wl/sys/wl_linux.c | Packet-free bridge carries TX/RX ownership |
 | wl-src/src/wl/sys/wl_linux.h | Matching packet-free declaration |
 

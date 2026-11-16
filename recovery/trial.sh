@@ -61,6 +61,11 @@ printf 'Manual restore: sudo bash %q\n' "$bundle/revert.sh"
 printf 'A reboot also restores stock. Installed driver files are untouched.\n'
 trap 'bash "$stage/revert.sh"; exit 1' ERR HUP INT TERM
 modprobe -r wl
+depends=$(modinfo -F depends "$stage/candidate/wl.ko")
+IFS=, read -r -a dependencies <<< "$depends"
+for dependency in "${dependencies[@]}"; do
+  modprobe "$dependency"
+done
 insmod "$stage/candidate/wl.ko"
 trap - ERR HUP INT TERM
 printf 'Temporary candidate loaded. Connect through the Wi-Fi menu.\n'
