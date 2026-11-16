@@ -40,6 +40,8 @@ elif name == "modprobe":
     if args == ["-r", "wl"]:
         if os.environ.get("FAIL_UNLOAD"): sys.exit(1)
         version.write_text("", encoding="utf-8")
+        resets = state / "wireless_stack_resets"
+        resets.write_text(str(int(resets.read_text(encoding="utf-8")) + 1), encoding="utf-8")
         (state / "dependencies").write_text("[]", encoding="utf-8")
     elif args == ["wl"]:
         version.write_text(os.environ.get("INSTALLED_VERSION", "stock-version") + "\n", encoding="utf-8")
@@ -47,6 +49,10 @@ elif name == "modprobe":
         if args[0] == os.environ.get("FAIL_DEPENDENCY"): sys.exit(1)
         dependencies = json.loads((state / "dependencies").read_text(encoding="utf-8"))
         (state / "dependencies").write_text(json.dumps(dependencies + args), encoding="utf-8")
+elif name == "rmmod":
+    assert args == ["wl"]
+    if os.environ.get("FAIL_UNLOAD"): sys.exit(1)
+    version.write_text("", encoding="utf-8")
 elif name == "insmod":
     candidate = "candidate" in Path(args[0]).parts
     if candidate and os.environ.get("FAIL_LOAD"): sys.exit(1)
@@ -57,7 +63,7 @@ elif name == "insmod":
 else: raise AssertionError(name)
 ''', encoding="utf-8")
 dispatcher.chmod(0o700)
-for name in ("id", "uname", "modinfo", "findmnt", "systemd-path", "systemd-run", "systemctl", "modprobe", "insmod"):
+for name in ("id", "uname", "modinfo", "findmnt", "systemd-path", "systemd-run", "systemctl", "modprobe", "rmmod", "insmod"):
     (stub / name).symlink_to(dispatcher)
 
 def manifest(directory, names):
@@ -71,6 +77,7 @@ def case(name):
         p.mkdir(parents=True)
     (state / "calls").write_text("", encoding="utf-8")
     (state / "dependencies").write_text('["cfg80211"]', encoding="utf-8")
+    (state / "wireless_stack_resets").write_text("0", encoding="utf-8")
     for script in ("trial.sh", "revert.sh"):
         shutil.copy2(repo / "recovery" / script, bundle / script)
     (bundle / "backup/wl.ko").write_bytes(b"stock module")
@@ -96,18 +103,19 @@ def calls(state):
 state, bundle, env = case("check")
 result = run(bundle, env, "trial.sh", "--check")
 assert result.returncode == 0, result.stderr
-assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
+assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
 
 state, bundle, env = case("timer-failed")
 env["FAIL_TIMER"] = "1"
 assert run(bundle, env).returncode != 0
-assert not any(c[0] in ("modprobe", "insmod") for c in calls(state))
+assert not any(c[0] in ("modprobe", "rmmod", "insmod") for c in calls(state))
 
 state, bundle, env = case("successful-trial")
 result = run(bundle, env)
 assert result.returncode == 0, result.stderr
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0", "Trial must preserve the shared Wi-Fi control stack"
 events = calls(state)
-assert next(i for i,c in enumerate(events) if c[0] == "systemd-run") < next(i for i,c in enumerate(events) if c[:2] == ["modprobe", "-r"])
+assert next(i for i,c in enumerate(events) if c[0] == "systemd-run") < next(i for i,c in enumerate(events) if c[0] == "rmmod")
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "candidate-version"
 timer_args = json.loads((state / "timer_args").read_text(encoding="utf-8"))
 assert "--on-active=120s" in timer_args
@@ -117,14 +125,16 @@ env["INSTALLED_VERSION"] = "updated-stock-version"
 result = subprocess.run(timer_args[-2:], env=env, text=True, capture_output=True, timeout=30)
 assert result.returncode == 0, result.stderr
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0", "Restore must preserve the shared Wi-Fi control stack"
 before = len(calls(state))
 assert run(bundle, env, "revert.sh").returncode == 0
-assert not any(c[0] in ("modprobe", "insmod") for c in calls(state)[before:])
+assert not any(c[0] in ("modprobe", "rmmod", "insmod") for c in calls(state)[before:])
 
 state, bundle, env = case("load-failed")
 env["FAIL_LOAD"] = "1"
 assert run(bundle, env).returncode != 0
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0"
 
 state, bundle, env = case("changed-installed-version")
 (state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")
@@ -148,15 +158,15 @@ assert result.returncode != 0 and "identity differs" in result.stderr
 state, bundle, env = case("tampered-module")
 (bundle / "candidate/wl.ko").write_bytes(b"corrupt")
 assert run(bundle, env).returncode != 0
-assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
+assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
 
 state, bundle, env = case("kernel-mismatch")
 (bundle / "backup/KERNEL").write_text("other-kernel\n", encoding="utf-8")
 manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
 manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
 assert run(bundle, env).returncode != 0
-assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
-print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, changed installed version, dependency reload/failure, tamper and kernel mismatch passed")
+assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
+print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, shared Wi-Fi stack preserved, dependency load/failure, tamper and kernel mismatch passed")
 
 state, bundle, env = case("unload-failed")
 (state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")
@@ -170,7 +180,7 @@ state, bundle, env = case("review-gate")
 (bundle / "READY_FOR_TRIAL").rename(bundle / "REVIEWS_PENDING")
 result = run(bundle, env)
 assert result.returncode != 0 and "Trial disabled" in result.stderr
-assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
+assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
 print("Recovery: busy unload gives reboot instructions; incomplete reviews disable trial")
 
 scan = root / "scanner-control"

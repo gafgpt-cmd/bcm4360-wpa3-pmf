@@ -70,10 +70,20 @@ No upstream PR while any required live test remains unverified.
 
 ## Live results
 
-Pending privileged trial and an identified WPA3 AP.
-Latest passive device check: Wi-Fi is the only physical uplink.
-Agent-led testing awaits the separate uplink required by the hardware test protocol.
-Do not replace this line with a pass based on host tests or module compilation.
+First timed trial: candidate module loaded; association NOT reached.
+Radio enabled/unblocked, but supplicant could not initialize the interface.
+The 120-second service restored the original module identity successfully.
+Wi-Fi remained unavailable after restore. Restarting the supplicant and cycling
+NetworkManager management of the Wi-Fi device restored stock association and DHCP.
+USB tethering kept the agent online; ordinary HTTPS returned200.
+No WPA3/PMF, phone-hotspot or weak-signal result established by this trial.
+
+Kernel logs show cfg80211 initialized again during both module swaps.
+The helpers used recursive `modprobe -r`; it may remove unused dependencies.
+Switch to `rmmod wl`, preserving the shared wireless stack and control-family ID.
+Reference: [kmod removal semantics](https://github.com/kmod-project/kmod/blob/master/man/modprobe.8.scd).
+The executable recovery regression rejects dependency teardown during either swap.
+It fails before this change. Revised helpers still require another live trial.
 
 ## Review regression verification
 
@@ -85,8 +95,9 @@ SA-Query PN 10 takes effect at RX before Block Ack PN 11 arrives; authenticated
 teardown PN 10 remains effective when its worker runs after Block Ack PN 11.
 Replayed and unauthenticated frames must not be processed.
 It also exercises ordinary requests, responses, Block Ack
-and PMF-inactive pass-through. Recovery stubs model kmod removing dependencies
-and insmod requiring them; both candidate and saved-module insertion must work.
+and PMF-inactive pass-through. Recovery stubs model recursive kmod removal,
+single-module removal and insmod dependencies. Both insertion paths must work,
+with no shared-stack teardown during candidate loading or stock restoration.
 These commands are local evidence only. The configured test command invokes
 both regression harnesses; the existing push/pull-request workflow invokes that
 same command without path filters or job conditions. No remote CI was run here.

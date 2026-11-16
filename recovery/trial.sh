@@ -7,7 +7,7 @@ case ${1:-} in
   *) printf 'Usage: bash trial.sh [--check]\n' >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then exit 2; fi
-for tool in sha256sum modinfo modprobe insmod systemd-run systemctl systemd-path flock install findmnt; do
+for tool in sha256sum modinfo modprobe rmmod insmod systemd-run systemctl systemd-path flock install findmnt; do
   command -v "$tool" >/dev/null || { printf 'Missing: %s\n' "$tool" >&2; exit 1; }
 done
 sha256sum --check --status SHA256SUMS
@@ -60,7 +60,8 @@ printf 'Automatic stock-driver restore armed for 120 seconds.\n'
 printf 'Manual restore: sudo bash %q\n' "$bundle/revert.sh"
 printf 'A reboot also restores stock. Installed driver files are untouched.\n'
 trap 'bash "$stage/revert.sh"; exit 1' ERR HUP INT TERM
-modprobe -r wl
+# Keep cfg80211 and its netlink family alive for the running supplicant.
+rmmod wl
 depends=$(modinfo -F depends "$stage/candidate/wl.ko")
 IFS=, read -r -a dependencies <<< "$depends"
 for dependency in "${dependencies[@]}"; do
