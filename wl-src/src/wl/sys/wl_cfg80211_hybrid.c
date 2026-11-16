@@ -3331,6 +3331,9 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 		if (offset < 0)
 			goto drop;
 		frame_off = offset;
+		if (skb->len - frame_off < 2 + 4 ||
+		    (skb->data[frame_off] & 0x03))
+			goto drop;
 	}
 	if (wl_sae.armed && wl_sae.dev && skb && skb->len > 60 && skb->len < 4096) {
 		const unsigned char *me = wl_sae.dev->dev_addr;

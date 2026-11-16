@@ -70,7 +70,16 @@ static void cancel_delayed_work(struct work_struct *w) { w->queued = false; }
 static bool _ieee80211_is_robust_mgmt_frame(struct ieee80211_hdr *h)
 {
     u8 *f = (u8 *)h;
-    return f[0] == 0xc0 || f[0] == 0xa0 || (f[0] == 0xd0 && ((f[1] & 0x40) || f[24] == 3 || f[24] == 8));
+    u8 subtype = f[0] & 0xfc;
+    if (subtype == 0xc0 || subtype == 0xa0) return true;
+    if (subtype != 0xd0) return false;
+    if (f[1] & 0x40) return true;
+    switch (f[24]) {
+    case 4: case 7: case 11: case 15: case 20: case 21: case 22: case 127:
+        return false;
+    default:
+        return true;
+    }
 }
 struct aes_cmac_key { u8 raw[16]; };
 struct aes_cmac_ctx { EVP_MAC_CTX *ctx; };
@@ -351,8 +360,37 @@ static void bursts(void)
     drain_teardown();
     assert(!disconnected);
 }
+static void frame_versions(void)
+{
+    const u8 subtypes[] = { 0xc0, 0xa0, 0xd0, 0xb0 };
+    unsigned int failures = 0;
+    for (unsigned int i = 0; i < sizeof(subtypes); i++) {
+        for (unsigned int version = 0; version < 4; version++) {
+            reset();
+            wl_sae.armed = subtypes[i] == 0xb0;
+            wl_sae.pmf_active = !wl_sae.armed;
+            dev.ieee80211_ptr = &dev;
+            memset(storage, 0, sizeof(storage));
+            u8 *f = storage + 20;
+            f[0] = subtypes[i] | version;
+            memcpy(f + 4, dev.dev_addr, 6);
+            memcpy(f + 10, ap, 6); memcpy(f + 16, ap, 6);
+            f[24] = 3; f[26] = 1;
+            packet.len = 70;
+            __wrap_wlc_recv(wlc, &packet);
+            unsigned int expected_auth = subtypes[i] == 0xb0 && version == 0;
+            printf("Frame 0x%02x version %u: blob=%u drop=%u auth=%u\n",
+                   subtypes[i], version, passed, dropped, auth_delivered);
+            failures += passed != 0 || dropped != 1 || auth_delivered != expected_auth;
+            assert(!disconnected && !wl_sae.dd_work.queued && wl_mgmt_pn == 0);
+        }
+    }
+    fflush(stdout);
+    assert(!failures);
+}
 int main(void)
 {
+    frame_versions();
     bursts();
     const u8 saq_response[] = { 8, 1, 0x34, 0x12 };
     const u8 saq_request[] = { 8, 0, 0x78, 0x56 };

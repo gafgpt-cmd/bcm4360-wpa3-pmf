@@ -2,11 +2,12 @@
 
 ## Required gates
 
-- GPT Astra: INCOMPLETE. Provider blocked further review after identifying the TX rekey race;
-  the race was fixed, but the required independent review remains open.
+- GPT Astra: changed-source review completed; identified an RX protocol-version bypass.
+  Fixed locally with executable regressions; final source recheck pending.
 - OpenCode Kimi K3.1: INCOMPLETE. Provider quota stopped the review.
-- no-mistakes: previous local run passed with live-validation override;
-  follow-up SAE fix requires a new run.
+- no-mistakes: first local run passed with live-validation override.
+  Follow-up reviewer stopped producing output; attempt cancelled through the CLI.
+  No pipeline fixes lost. SAE/RX follow-up requires complete revalidation.
 - Gitleaks: prior local scan and synthetic-credential detection control passed.
 - GitHub CI: pending; no self-hosted runner is available for the new repository.
   A full local mirror of the configured test and lint commands may satisfy the CI gate;
@@ -122,3 +123,24 @@ The status-zero filter dropped anti-clogging, group negotiation, H2E and SAE-PK.
 Before the fix: only status 0 delivered. After: all five delivered.
 Full configured test and lint commands passed locally after this change.
 This demonstrates frame delivery, not successful hotspot association.
+
+## Astra RX version regression
+
+The actual RX wrapper accepted unsupported protocol-version bits for deauth,
+disassoc, robust Action and SAE Authentication. The proprietary parser masks
+those bits; exact-byte wrapper comparisons missed the same subtypes.
+Reject versions 1/2/3 before either SAE or PMF dispatch. Never normalize them.
+The regression executes all four families with versions 0/1/2/3.
+Malformed frames must be freed, with no blob delivery or supplicant event.
+Version-zero SAE remains delivered; unprotected robust frames remain dropped.
+The test classifier follows Linux's subtype mask and robust-category exclusions.
+The new regression fails before the guard. On-air ingress remains untested.
+
+## Remote source checks
+
+Revision `ded5741`: full test and lint commands passed on the connected CI host.
+The isolated image lacked OpenSSL headers, pkg-config and Gitleaks;
+checks ran in fresh host scratch with installed tools. No radio operations.
+Follow-up commits require their own remote checks.
+Repository has no assigned Actions runner. Fleet Actions admission is private-only;
+the documented local/remote command mirror does not claim an Actions run.
