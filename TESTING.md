@@ -7,11 +7,10 @@
 - OpenCode Kimi K3.1: WAIVED by owner on 2026-11-16. Quota stopped its review.
   Neither waiver counts as model approval. No further named-model review required.
 - no-mistakes: run `01M7JZQCDAHF5868KVDGD7DG0S` completed through source push
-  at `88fae2f`; no review findings. Live-validation exception remains recorded.
+  at `88fae2f`; no source review findings. Passed-with-override solely for
+  inconclusive live validation; hardware validation remains pending.
 - Gitleaks: directory and 25-commit history scans passed; detection control passed.
 - CI evidence: [Remote source checks](#remote-source-checks).
-  Full configured commands passed on published `88fae2f`; external source status green.
-  Actions had no eligible runner; its unstarted run was cancelled.
 - Live validation: pending; see the protocol and results below.
 
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
@@ -72,6 +71,8 @@ No upstream PR while any required live test remains unverified.
 ## Live results
 
 Pending privileged trial and an identified WPA3 AP.
+Latest passive device check: Wi-Fi is the only physical uplink.
+Agent-led testing awaits the separate uplink required by the hardware test protocol.
 Do not replace this line with a pass based on host tests or module compilation.
 
 ## Review regression verification
@@ -154,6 +155,9 @@ Remote transcript: `omar-bdf1fac.log`, retained on the originating machine.
 The isolated image lacked OpenSSL headers, pkg-config and Gitleaks;
 checks ran in fresh host scratch with installed tools. No radio operations.
 Follow-up commits require their own remote checks.
+Published `88fae2f`: full configured test/lint command mirror passed on the connected host.
+External `ci/offline-source` status was green for those commands only.
 Repository has no assigned Actions runner. Fleet Actions admission is private-only;
 the documented local/remote command mirror does not claim an Actions run.
+Actions had no eligible runner; its unstarted run was cancelled.
 Do not register a public runner or change admission policy.
