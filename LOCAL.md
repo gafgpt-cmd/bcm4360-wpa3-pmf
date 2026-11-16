@@ -36,12 +36,18 @@ to the bundle. READY_FOR_TRIAL contains the approved hash for candidate/wl.ko.
 ```bash
 bash trial.sh --check
 sudo bash trial.sh
+sudo bash trial.sh --provisional
 sudo bash revert.sh
 ```
 
+Default trial: 120 seconds, no argument.
+Provisional trial: 3600 seconds, `--provisional`.
+Provisional is still temporary: no installation, no profile change, no service restart.
+Reboot loads stock in both modes.
+Manual rollback: `sudo bash revert.sh`, or any reboot.
 Trial verifies hashes, kernel, loaded stock identity and signature policy.
 Copies recovery files into a root-owned runtime directory.
-Arms a 120-second system timer before unloading stock.
+Arms the timer before unloading stock: 120 seconds by default, 3600 provisional.
 Trial and recovery use `rmmod wl` to preserve cfg80211 and its netlink family.
 Both load module dependencies before `insmod`.
 The timer invokes stock restoration; failed loading invokes it immediately.

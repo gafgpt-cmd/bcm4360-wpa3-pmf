@@ -121,6 +121,8 @@ timer_args = json.loads((state / "timer_args").read_text(encoding="utf-8"))
 assert "--on-active=120s" in timer_args
 root_copy = Path(timer_args[-1])
 assert root_copy.parent.parent == state / "run"
+assert "Actual trial duration: 120 seconds" in result.stdout
+assert "Manual restore: sudo bash" in result.stdout
 env["INSTALLED_VERSION"] = "updated-stock-version"
 result = subprocess.run(timer_args[-2:], env=env, text=True, capture_output=True, timeout=30)
 assert result.returncode == 0, result.stderr
@@ -129,6 +131,51 @@ assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0", "Re
 before = len(calls(state))
 assert run(bundle, env, "revert.sh").returncode == 0
 assert not any(c[0] in ("modprobe", "rmmod", "insmod") for c in calls(state)[before:])
+
+state, bundle, env = case("provisional-trial")
+result = run(bundle, env, "trial.sh", "--provisional")
+assert result.returncode == 0, result.stderr
+assert "Actual trial duration: 3600 seconds" in result.stdout
+assert "Manual restore: sudo bash" in result.stdout
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0", "Provisional trial must preserve the shared Wi-Fi control stack"
+events = calls(state)
+assert next(i for i,c in enumerate(events) if c[0] == "systemd-run") < next(i for i,c in enumerate(events) if c[0] == "rmmod"), "Provisional timer must be armed before stock unload"
+provisional_args = json.loads((state / "timer_args").read_text(encoding="utf-8"))
+assert "--on-active=3600s" in provisional_args
+provisional_copy = Path(provisional_args[-1])
+assert provisional_copy.parent.parent == state / "run"
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "candidate-version"
+env["INSTALLED_VERSION"] = "updated-stock-version"
+result = subprocess.run(provisional_args[-2:], env=env, text=True, capture_output=True, timeout=30)
+assert result.returncode == 0, result.stderr
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0", "Provisional restore must preserve the shared Wi-Fi control stack"
+
+state, bundle, env = case("provisional-timer-failed")
+env["FAIL_TIMER"] = "1"
+assert run(bundle, env, "trial.sh", "--provisional").returncode != 0
+assert not any(c[0] in ("modprobe", "rmmod", "insmod") for c in calls(state))
+
+state, bundle, env = case("provisional-load-failed")
+env["FAIL_LOAD"] = "1"
+result = run(bundle, env, "trial.sh", "--provisional")
+assert result.returncode != 0
+assert "Actual trial duration: 3600 seconds" in result.stdout
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+assert (state / "wireless_stack_resets").read_text(encoding="utf-8") == "0"
+
+state, bundle, env = case("provisional-unload-failed")
+env["FAIL_UNLOAD"] = "1"
+assert run(bundle, env, "trial.sh", "--provisional").returncode != 0
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-version"
+assert not any(c[0] == "insmod" and "candidate" in c[-1] for c in calls(state))
+
+for args in (("--bogus",), ("--provisional", "extra"), ("--check", "--provisional"), ("--provisional", "--check")):
+    state, bundle, env = case("invalid-" + "-".join(arg.strip("-") for arg in args))
+    result = run(bundle, env, "trial.sh", *args)
+    assert result.returncode == 2, args
+    assert "Usage" in result.stderr, args
+    assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state)), args
 
 state, bundle, env = case("load-failed")
 env["FAIL_LOAD"] = "1"
@@ -167,6 +214,7 @@ manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "bac
 assert run(bundle, env).returncode != 0
 assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
 print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, shared Wi-Fi stack preserved, dependency load/failure, tamper and kernel mismatch passed")
+print("Recovery: provisional 3600-second timer ordering, restore and failure cleanup; default 120-second duration; invalid arguments rejected")
 
 state, bundle, env = case("unload-failed")
 (state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")

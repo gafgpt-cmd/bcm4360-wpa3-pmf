@@ -2,11 +2,18 @@
 set -euo pipefail
 bundle=$(cd -- "$(dirname -- "$0")" && pwd)
 cd "$bundle"
+duration=120
+mode=trial
 case ${1:-} in
-  ''|--check) ;;
-  *) printf 'Usage: bash trial.sh [--check]\n' >&2; exit 2 ;;
+  '') ;;
+  --check) mode=check ;;
+  --provisional) duration=3600 ;;
+  *) printf 'Usage: bash trial.sh [--check | --provisional]\n' >&2; exit 2 ;;
 esac
-if (( $# > 1 )); then exit 2; fi
+if (( $# > 1 )); then
+  printf 'Usage: bash trial.sh [--check | --provisional]\n' >&2
+  exit 2
+fi
 for tool in sha256sum modinfo modprobe rmmod insmod systemd-run systemctl systemd-path flock install findmnt; do
   command -v "$tool" >/dev/null || { printf 'Missing: %s\n' "$tool" >&2; exit 1; }
 done
@@ -24,7 +31,7 @@ fi
 if [[ -r $sysroot/module/module/parameters/sig_enforce ]] && grep -qi '^y' "$sysroot/module/module/parameters/sig_enforce"; then
   printf 'Module signatures enforced. Unsigned trial refused.\n' >&2; exit 1
 fi
-if [[ ${1:-} == --check ]]; then
+if [[ $mode == check ]]; then
   printf 'Files, kernel and original driver verified. No changes made.\n'
   exit 0
 fi
@@ -52,11 +59,11 @@ install -m 600 candidate/wl.ko "$stage/candidate/"
 cd "$stage"
 sha256sum --check --status SHA256SUMS
 bash_bin=$(command -v bash)
-systemd-run --unit=wl-wpa3-restore --collect --on-active=120s \
+systemd-run --unit=wl-wpa3-restore --collect --on-active="${duration}s" \
   --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no \
   --property=Type=oneshot --property=TimeoutStartSec=45s "$bash_bin" "$stage/revert.sh"
 systemctl is-active --quiet wl-wpa3-restore.timer
-printf 'Automatic stock-driver restore armed for 120 seconds.\n'
+printf 'Automatic stock-driver restore armed. Actual trial duration: %d seconds.\n' "$duration"
 printf 'Manual restore: sudo bash %q\n' "$bundle/revert.sh"
 printf 'A reboot also restores stock. Installed driver files are untouched.\n'
 trap 'bash "$stage/revert.sh"; exit 1' ERR HUP INT TERM
@@ -70,4 +77,5 @@ done
 insmod "$stage/candidate/wl.ko"
 trap - ERR HUP INT TERM
 printf 'Temporary candidate loaded. Connect through the Wi-Fi menu.\n'
+printf 'Actual trial duration: %d seconds.\n' "$duration"
 printf 'The trial ALWAYS reverts automatically. No keep/install action exists.\n'

@@ -37,7 +37,8 @@ proprietary blob or generated module publication.
 - Recovery cases: dry run, timer failure, load failure, timer-before-unload,
   automatic/manual saved-module restore, changed installed version, shared-stack
   preservation, dependency loading/failure, metadata failure, wrong saved identity,
-  tamper, kernel mismatch and busy-unload refusal.
+  tamper, kernel mismatch, busy-unload refusal, default 120-second and provisional
+  3600-second durations, provisional timer ordering/failure cleanup and invalid arguments.
 - Exact-kernel module build: `bdf1fac` passed against 7.2.15-1-omarchy,
   using a source archive and unchanged distribution blob outside Git.
   Module SHA-256: `5a47ba7af2f4ad44196035a49105af7d4948ad98e79b034f3e77e9e28bfb9da8`.
