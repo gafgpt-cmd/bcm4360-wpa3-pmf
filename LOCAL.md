@@ -27,6 +27,7 @@ Do not run upstream dkms/install.sh unchanged.
 Keep beside each other:
 
 - trial.sh, revert.sh, SHA256SUMS
+- READY_FOR_TRIAL: candidate checksum, created only after required review/gate approvals
 - candidate/wl.ko
 - backup/wl.ko, KERNEL, SRCVERSION, SHA256SUMS
 
@@ -43,10 +44,12 @@ Timer always restores stock. Failed loading also restores stock.
 Recovery verifies stock identity and falls back to the saved module.
 Installed module files and saved Wi-Fi profiles stay untouched.
 Reboot loads stock. A kernel hang can defeat the timer; reboot may be necessary.
+Busy unload prints reboot instructions; it never force-unloads a module.
+Missing READY_FOR_TRIAL disables loading; read-only --check still works.
 
 ## Required independent reviews
 
-- GPT Astra: pending.
+- GPT Astra: incomplete; provider blocked the review after reporting a rekey race.
 - OpenCode Kimi K3.1: pending.
 - no-mistakes and forge checks: pending.
 

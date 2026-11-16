@@ -1194,6 +1194,7 @@ static struct {
 	bool pmf_active;    /* 802.11w MFP negotiated + IGTK installed -> enforce SW PMF on RX */
 	u8  tk[16];         /* pairwise CCMP temporal key (PTK TK) for SW mgmt-frame crypto */
 	bool tk_set;
+	u8 tk_key_idx;
 	atomic64_t tx_pn;   /* our TX PN for SW-protected mgmt frames (SA-Query Response, Block Ack) */
 	struct delayed_work assoc_wd;  /* association watchdog: see wl_sae_assoc_wd_work() */
 	struct work_struct saq_work;   /* deferred SA-Query handler (RX path is atomic) */
@@ -1236,7 +1237,6 @@ static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why
 static void wl_re_saq_chk_work(struct work_struct *w);
 void wl_re_link_tick(struct net_device *dev, unsigned long tx, unsigned long retry);
 static void wl_re_fast_key(const u8 *tk, bool changed);
-extern void wl_re_pktfree(struct net_device *dev, void *pkt, bool send);
 static void wl_re_crypto_exit(void);
 
 /* After the host SAE succeeds we drive the blob into association (wl_re_drive_assoc). With this
@@ -1836,30 +1836,6 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 		spin_unlock_irqrestore(&wl_bip_lock, flags);
 		return err;
 	}
-	/* Capture the pairwise CCMP temporal key (PTK TK) for the SW SA-Query crypto. */
-	if (params->cipher == WLAN_CIPHER_SUITE_CCMP && pairwise &&
-	    params->key && params->key_len == 16) {
-		unsigned long flags;
-		bool changed;
-		mutex_lock(&wl_saq_lock);
-		spin_lock_irqsave(&wl_bip_lock, flags);
-		atomic_inc(&wl_key_epoch);
-		changed = !wl_sae.tk_set || crypto_memneq(wl_sae.tk, params->key, 16);
-		if (changed) {
-			wl_mgmt_pn = 0;
-		}
-		spin_unlock_irqrestore(&wl_bip_lock, flags);
-		memcpy(wl_sae.tk, params->key, 16);
-		wl_sae.tk_set = true;
-		wl_re_fast_key(wl_sae.tk, changed);
-		spin_lock_irqsave(&wl_bip_lock, flags);
-		atomic_inc(&wl_key_epoch);
-		spin_unlock_irqrestore(&wl_bip_lock, flags);
-		mutex_unlock(&wl_saq_lock);
-		re_log("re add_key: captured pairwise CCMP TK for SW mgmt crypto\n");
-		wl_sae.ptk_done = true;
-		cancel_delayed_work(&wl_sae.hs_wd);
-	}
 
 	memset(&key, 0, sizeof(key));
 
@@ -1971,6 +1947,29 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 	else {
 		wl->profile->sec.cipher_group = params->cipher;
 	}
+	/* Publish software keys only after hardware installation succeeds. */
+	if (params->cipher == WLAN_CIPHER_SUITE_CCMP && pairwise &&
+	    params->key && params->key_len == 16) {
+		unsigned long flags;
+		bool changed;
+		mutex_lock(&wl_saq_lock);
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		atomic_inc(&wl_key_epoch);
+		changed = !wl_sae.tk_set || crypto_memneq(wl_sae.tk, params->key, 16);
+		if (changed)
+			wl_mgmt_pn = 0;
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		memcpy(wl_sae.tk, params->key, 16);
+		wl_sae.tk_key_idx = key_idx;
+		wl_sae.tk_set = true;
+		wl_re_fast_key(wl_sae.tk, changed);
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		atomic_inc(&wl_key_epoch);
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		mutex_unlock(&wl_saq_lock);
+		wl_sae.ptk_done = true;
+		cancel_delayed_work(&wl_sae.hs_wd);
+	}
 
 	return err;
 }
@@ -2033,6 +2032,19 @@ wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
 			WL_ERR(("WLC_SET_KEY error (%d)\n", err));
 		}
 		return err;
+	}
+	if (pairwise && key_idx == wl_sae.tk_key_idx &&
+	    (!mac_addr || !memcmp(mac_addr, wl_sae.bssid, ETH_ALEN))) {
+		unsigned long flags;
+		mutex_lock(&wl_saq_lock);
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		atomic_add(2, &wl_key_epoch);
+		wl_mgmt_pn = 0;
+		wl_sae.tk_set = false;
+		memzero_explicit(wl_sae.tk, sizeof(wl_sae.tk));
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		wl_re_crypto_exit();
+		mutex_unlock(&wl_saq_lock);
 	}
 
 	return err;

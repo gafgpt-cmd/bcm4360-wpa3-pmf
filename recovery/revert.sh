@@ -21,7 +21,10 @@ if [[ $loaded == "$saved_version" ]]; then
   exit 0
 fi
 if [[ -n $loaded ]]; then
-  modprobe -r wl
+  if ! modprobe -r wl; then
+    printf 'Driver is busy and cannot unload. Reboot to restore the installed stock driver.\n' >&2
+    exit 1
+  fi
 fi
 if ! modprobe wl; then
   modprobe cfg80211

@@ -28,6 +28,11 @@ if [[ ${1:-} == --check ]]; then
   printf 'Files, kernel and original driver verified. No changes made.\n'
   exit 0
 fi
+if [[ ! -f READY_FOR_TRIAL ]]; then
+  printf 'Trial disabled: required independent reviews and validation are incomplete.\n' >&2
+  exit 1
+fi
+sha256sum --check --status READY_FOR_TRIAL
 if [[ $(id -u) != 0 ]]; then
   printf 'Run: sudo bash %q\n' "$bundle/trial.sh" >&2
   exit 1
@@ -41,7 +46,7 @@ fi
 umask 077
 stage=$(mktemp -d "$runtime_root/wl-wpa3-trial.XXXXXX")
 install -d -m 700 "$stage/backup" "$stage/candidate"
-install -m 600 trial.sh revert.sh SHA256SUMS "$stage/"
+install -m 600 trial.sh revert.sh SHA256SUMS READY_FOR_TRIAL "$stage/"
 install -m 600 backup/wl.ko backup/KERNEL backup/SRCVERSION backup/SHA256SUMS "$stage/backup/"
 install -m 600 candidate/wl.ko "$stage/candidate/"
 cd "$stage"

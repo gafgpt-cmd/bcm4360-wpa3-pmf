@@ -62,6 +62,8 @@ def case(name):
         shutil.copy2(repo / "recovery" / script, bundle / script)
     (bundle / "backup/wl.ko").write_bytes(b"stock module")
     (bundle / "candidate/wl.ko").write_bytes(b"candidate module")
+    candidate_hash = hashlib.sha256(b"candidate module").hexdigest()
+    (bundle / "READY_FOR_TRIAL").write_text(candidate_hash + "  candidate/wl.ko\n", encoding="utf-8")
     (bundle / "backup/KERNEL").write_text("test-kernel\n", encoding="utf-8")
     (bundle / "backup/SRCVERSION").write_text("stock-version\n", encoding="utf-8")
     (state / "sys/module/wl/srcversion").write_text("stock-version\n", encoding="utf-8")
@@ -128,6 +130,21 @@ manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "bac
 assert run(bundle, env).returncode != 0
 assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
 print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, backup fallback, tamper and kernel mismatch passed")
+
+state, bundle, env = case("unload-failed")
+(state / "sys/module/wl/srcversion").write_text("candidate-version\n", encoding="utf-8")
+env["FAIL_UNLOAD"] = "1"
+result = run(bundle, env, "revert.sh")
+assert result.returncode != 0 and "Reboot" in result.stderr
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "candidate-version"
+assert not any(c[0] == "insmod" for c in calls(state))
+
+state, bundle, env = case("review-gate")
+(bundle / "READY_FOR_TRIAL").rename(bundle / "REVIEWS_PENDING")
+result = run(bundle, env)
+assert result.returncode != 0 and "Trial disabled" in result.stderr
+assert not any(c[0] in ("modprobe", "insmod", "systemd-run") for c in calls(state))
+print("Recovery: busy unload gives reboot instructions; incomplete reviews disable trial")
 
 scan = root / "scanner-control"
 scan.mkdir()
