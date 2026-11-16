@@ -1,7 +1,7 @@
 # Local patches
 
 Base: linux-7.3-wpa3-transition-mode, 4d49a9b.
-Local work only. No remote publication.
+Source-only fork. Validation and publication status: [TESTING.md](TESTING.md).
 
 | Upstream file | Change |
 | --- | --- |

@@ -6,7 +6,7 @@ No persistent installation. No upstream PR until hardware tests pass.
 
 ## Check
 
-Needs: C compiler, OpenSSL development files, Python 3, ShellCheck, Gitleaks.
+Needs: C compiler, OpenSSL development files, pkg-config, Python 3, ShellCheck, Gitleaks.
 
 ```bash
 bash tests/check.sh

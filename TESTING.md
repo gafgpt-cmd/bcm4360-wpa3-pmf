@@ -3,19 +3,23 @@
 ## Required gates
 
 - GPT Astra: changed-source review completed; identified an RX protocol-version bypass.
-  Fixed locally with executable regressions; final source recheck pending.
+  Fixed in `bdf1fac` with executable regressions. Recheck refused by provider;
+  approval remains INCOMPLETE. Do not retry or rephrase to evade the refusal.
 - OpenCode Kimi K3.1: INCOMPLETE. Provider quota stopped the review.
 - no-mistakes: first local run passed with live-validation override.
   Follow-up reviewer stopped producing output; attempt cancelled through the CLI.
   No pipeline fixes lost. SAE/RX follow-up requires complete revalidation.
 - Gitleaks: prior local scan and synthetic-credential detection control passed.
-- GitHub CI: pending; no self-hosted runner is available for the new repository.
-  A full local mirror of the configured test and lint commands may satisfy the CI gate;
-  it must pass on the final source revision and does not replace Astra or Kimi.
+- CI evidence: [Remote source checks](#remote-source-checks).
+  Final pipeline source still requires the full configured command mirror;
+  it does not replace Astra or Kimi.
 - Live validation: pending; see the protocol and results below.
 
 No deployment while required pre-deployment gates remain open. Local checks are not
 independent-review approval or hardware evidence. No upstream PR before genuine live validation.
+Never create READY_FOR_TRIAL while approvals remain incomplete.
+Publication scope: feature-branch source only; no main push, merge, upstream PR,
+proprietary blob or generated module publication.
 
 ## Local evidence
 
@@ -31,8 +35,13 @@ independent-review approval or hardware evidence. No upstream PR before genuine 
 - Recovery cases: dry run, timer failure, load failure, timer-before-unload,
   automatic/manual saved-module restore, changed installed version, dependency
   removal/reload, dependency/metadata failure, wrong saved identity, tamper, kernel mismatch.
-- Exact-kernel module build: passed before final review.
+- Exact-kernel module build: `bdf1fac` passed against 7.2.15-1-omarchy,
+  using a source archive and unchanged distribution blob outside Git.
+  Module SHA-256: `5a47ba7af2f4ad44196035a49105af7d4948ad98e79b034f3e77e9e28bfb9da8`.
+  Rebuild after any driver or build-source change.
 - Hardware behavior: not tested yet.
+  Low-signal stalls and GrapheneOS Pixel 9 Pro hotspot failures are reported;
+  hardware causes remain hypotheses. Neither has an established fix.
 
 ## Hardware test protocol
 
@@ -87,7 +96,8 @@ control passed; the changed driver object compiled against 7.2.15-1-omarchy.
 The pre-review revision `a1f2655` fails the delayed-SA-Query regression and the recovery
 dependency-removal regression. The kernel object build reports four existing
 missing-prototype warnings on Broadcom wrapper entrypoints. Full module linking
-was not attempted because the proprietary blob is absent from this worktree.
+was not attempted in that review because the proprietary blob was absent.
+Later full-module evidence: [Local evidence](#local-evidence).
 
 ## Worker-contention regression verification
 
@@ -138,9 +148,12 @@ The new regression fails before the guard. On-air ingress remains untested.
 
 ## Remote source checks
 
-Revision `ded5741`: full test and lint commands passed on the connected CI host.
+Revisions `ded5741` and `bdf1fac`: full test and lint commands passed on the connected CI host.
+For `bdf1fac`, the caller also ran both commands locally; all passed.
+Remote transcript: `omar-bdf1fac.log`, retained on the originating machine.
 The isolated image lacked OpenSSL headers, pkg-config and Gitleaks;
 checks ran in fresh host scratch with installed tools. No radio operations.
 Follow-up commits require their own remote checks.
 Repository has no assigned Actions runner. Fleet Actions admission is private-only;
 the documented local/remote command mirror does not claim an Actions run.
+Do not register a public runner or change admission policy.

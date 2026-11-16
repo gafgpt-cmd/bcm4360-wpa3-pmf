@@ -26,6 +26,8 @@ That's enough to drive SAE frames over the air, inject `wpa_supplicant`'s RSN IE
 assoc-req, install userspace-derived keys, and add software PMF: BIP-CMAC-128 verification
 for group robust management frames and a shared CCMP replay floor for protected unicast
 management frames, including SA-Query, Block Ack and teardown.
+Every SAE status reaches `wpa_supplicant`, including negotiation and rejection statuses.
+During SAE or PMF, RX rejects unsupported 802.11 protocol versions before blob dispatch.
 
 ## Reverse engineering
 
