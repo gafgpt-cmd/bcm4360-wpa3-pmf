@@ -5,7 +5,7 @@ Source-only fork. Validation and publication status: [TESTING.md](TESTING.md).
 
 | Upstream file | Change |
 | --- | --- |
-| wl-src/src/wl/sys/wl_cfg80211_hybrid.c | BIP-CMAC key lifecycle, ordered RX verification/effects, teardown priority, worker cancellation; forward all SAE statuses; reject unsupported RX versions |
+| wl-src/src/wl/sys/wl_cfg80211_hybrid.c | BIP-CMAC key lifecycle, ordered RX verification/effects, teardown priority, worker cancellation; forward SAE statuses only after external-auth START; reject unsupported RX versions |
 | wl-src/src/wl/sys/wl_linux.c | Packet-free bridge carries TX/RX ownership |
 | wl-src/src/wl/sys/wl_linux.h | Matching packet-free declaration |
 

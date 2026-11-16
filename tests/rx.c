@@ -18,12 +18,20 @@ struct sk_buff { u8 *data; unsigned int len; };
 struct ieee80211_hdr { u8 data[24]; };
 struct wl_cfg80211_priv { unsigned long status; void *profile; };
 typedef struct { u8 ea[6]; u32 val; } scb_val_t;
+struct cfg80211_ssid { u8 ssid[32]; unsigned int ssid_len; };
+struct cfg80211_external_auth_params {
+    int action;
+    u32 key_mgmt_suite;
+    u8 bssid[6];
+    struct cfg80211_ssid ssid;
+};
 static struct wl_cfg80211_priv priv;
 struct {
     struct net_device *dev;
+    struct cfg80211_ssid ssid;
     u8 bssid[6], saq_frame[320], dd_frame[96];
     unsigned int saq_len, dd_len, freq, dd_reason;
-    bool armed, pmf_active, tk_set, saq_busy, dd_busy, saq_pending, sae_ok;
+    bool armed, external_auth_started, pmf_active, tk_set, saq_busy, dd_busy, saq_pending, sae_ok;
     u8 tk_key_idx;
     u16 saq_tid;
     int dd_kind, tx_pn, saq_tries;
@@ -37,6 +45,8 @@ static bool wl_re_fast_ok = true;
 static void *wl_re_fast_tfm;
 
 static unsigned int passed, dropped, disconnected, responses, auth_delivered;
+static unsigned int auth_requests;
+static int auth_request_error;
 static u16 disconnect_reason;
 static u8 last_pass[128], last_response[44];
 static const u8 tk[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -48,6 +58,9 @@ static const u8 tk[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 
 #define LINUX_VERSION_CODE KERNEL_VERSION(7, 2, 0)
 #define WL_STATUS_CONNECTED 0
 #define ETHER_ADDR_LEN 6
+#define ETH_ALEN 6
+#define NL80211_EXTERNAL_AUTH_START 0
+#define WLAN_AKM_SUITE_SAE 0x000fac08
 #define WLC_DISASSOC 1
 #define htod32(x) (x)
 #define WLAN_STATUS_REQUEST_DECLINED 37
@@ -123,6 +136,17 @@ static bool cfg80211_rx_mgmt(void *dev, unsigned int freq, int sig, const u8 *f,
     assert(len == 46 && f[0] == 0xb0 && f[24] == 3);
     auth_delivered++;
     return true;
+}
+static int cfg80211_external_auth_request(struct net_device *ndev,
+                                         const struct cfg80211_external_auth_params *ext, int gfp)
+{
+    (void)gfp;
+    assert(ndev == wl_sae.dev && wl_sae.external_auth_started);
+    assert(ext->action == NL80211_EXTERNAL_AUTH_START && ext->key_mgmt_suite == WLAN_AKM_SUITE_SAE);
+    assert(!memcmp(ext->bssid, wl_sae.bssid, 6));
+    assert(!memcmp(&ext->ssid, &wl_sae.ssid, sizeof(ext->ssid)));
+    auth_requests++;
+    return auth_request_error;
 }
 static void (*during_setup)(void), (*during_probe)(void), (*during_decrypt)(void);
 static void inject(void (**hook)(void))
@@ -237,6 +261,7 @@ static void reset(void)
     wl_sae.pmf_active = wl_sae.tk_set = true;
     wl_mgmt_pn = 0; wl_key_epoch = 0; wl_re_fast_ok = true;
     passed = dropped = disconnected = responses = auth_delivered = 0;
+    auth_requests = 0; auth_request_error = 0;
     dev.ieee80211_ptr = NULL;
     priv.status = 1;
     during_setup = during_probe = during_decrypt = NULL;
@@ -368,6 +393,7 @@ static void frame_versions(void)
         for (unsigned int version = 0; version < 4; version++) {
             reset();
             wl_sae.armed = subtypes[i] == 0xb0;
+            wl_sae.external_auth_started = true;
             wl_sae.pmf_active = !wl_sae.armed;
             dev.ieee80211_ptr = &dev;
             memset(storage, 0, sizeof(storage));
@@ -390,6 +416,18 @@ static void frame_versions(void)
 }
 int main(void)
 {
+    reset();
+    wl_sae_ext_auth_work(NULL);
+    assert(!auth_requests && !wl_sae.external_auth_started);
+    wl_sae.armed = true;
+    wl_sae_ext_auth_work(NULL);
+    assert(auth_requests == 1 && wl_sae.external_auth_started);
+    auth_request_error = -EINVAL;
+    wl_sae_ext_auth_work(NULL);
+    assert(auth_requests == 2 && !wl_sae.external_auth_started);
+    wl_sae.dev = NULL;
+    wl_sae_ext_auth_work(NULL);
+    assert(auth_requests == 2);
     frame_versions();
     bursts();
     const u8 saq_response[] = { 8, 1, 0x34, 0x12 };
@@ -438,9 +476,11 @@ int main(void)
     assert(passed == 1 && wl_mgmt_pn == 0);
     const u16 statuses[] = { 0, 76, 77, 126, 127 };
     unsigned int failures = 0;
-    for (unsigned int i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++) {
+    for (unsigned int phase = 0; phase < 2; phase++) {
+      for (unsigned int i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++) {
         reset();
         wl_sae.armed = true; wl_sae.pmf_active = false;
+        wl_sae.external_auth_started = phase;
         dev.ieee80211_ptr = &dev;
         memset(storage, 0, sizeof(storage));
         u8 *f = storage + 20;
@@ -451,8 +491,9 @@ int main(void)
         f[28] = (u8)statuses[i]; f[29] = statuses[i] >> 8;
         packet.len = 70;
         __wrap_wlc_recv(wlc, &packet);
-        printf("SAE status %u: delivered=%u expected=1\n", statuses[i], auth_delivered);
-        failures += auth_delivered != 1 || passed != 0 || dropped != 1;
+        printf("SAE phase %u status %u: delivered=%u expected=%u\n", phase, statuses[i], auth_delivered, phase);
+        failures += auth_delivered != phase || passed != 0 || dropped != 1;
+      }
     }
     if (failures) return 1;
     puts("RX: authenticated burst effects, queued/running workers, group/unicast teardown, session/key boundaries, replay and WPA2 pass-through passed");

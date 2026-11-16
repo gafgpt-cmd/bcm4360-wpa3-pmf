@@ -1202,6 +1202,7 @@ static struct {
 	u16  saq_tid;
 	int  saq_tries;
 	bool stub_seen;     /* the blob has sent its own stub auth frame for this join */
+	bool external_auth_started;
 	atomic_t txfail_cnt;           /* WLC_E_TXFAIL events seen (a frame the AP never ACKed) */
 	u32  assoc_status;             /* 802.11 status code of the last association response (WLC_E_ASSOC) */
 	struct delayed_work retry_work; /* retry a join the AP answered with status 30 */
@@ -1282,6 +1283,7 @@ static int wl_sae_issue_join(struct net_device *dev)
 
 	if (wl_sae.sae_conn) {   /* SAE: a fresh host-driven exchange; other joins are fully blob-driven */
 		wl_sae.stub_seen = false;
+		WRITE_ONCE(wl_sae.external_auth_started, false);
 		wl_sae.armed = 1;
 		schedule_delayed_work(&wl_sae.work, msecs_to_jiffies(WL_SAE_START_FALLBACK_MS));
 	}
@@ -1382,14 +1384,17 @@ static void wl_sae_ext_auth_work(struct work_struct *w)
 {
 	struct cfg80211_external_auth_params ext;
 	int rc;
-	if (!wl_sae.dev)
+	if (!wl_sae.dev || !READ_ONCE(wl_sae.armed))
 		return;
 	memset(&ext, 0, sizeof(ext));
 	ext.action = NL80211_EXTERNAL_AUTH_START;
 	ext.key_mgmt_suite = WLAN_AKM_SUITE_SAE;
 	memcpy(ext.bssid, wl_sae.bssid, ETH_ALEN);
 	ext.ssid = wl_sae.ssid;
+	WRITE_ONCE(wl_sae.external_auth_started, true);
 	rc = cfg80211_external_auth_request(wl_sae.dev, &ext, GFP_KERNEL);
+	if (rc)
+		WRITE_ONCE(wl_sae.external_auth_started, false);
 	re_log("re: deferred external SAE auth for %pM -> %d\n", wl_sae.bssid, rc);
 }
 
@@ -1425,6 +1430,7 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	/* Capture wpa_supplicant's assoc IEs (RSN + RSNXE) so the firmware can emit them
 	 * verbatim in the SAE assoc-req (see wl_re_drive_assoc). */
 	wl_sae.assoc_ie_len = 0;
+	WRITE_ONCE(wl_sae.external_auth_started, false);
 	wl_re_pmf_stop();
 	if (wl_sae.inited) {
 		cancel_work_sync(&wl_sae.saq_work);
@@ -1598,6 +1604,7 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		re_log("re: CONNECTING set\n");
 		if (wl_sae.sae_conn) {
 			wl_sae.stub_seen = false;
+			WRITE_ONCE(wl_sae.external_auth_started, false);
 			wl_sae.armed = 1;
 			schedule_delayed_work(&wl_sae.work, msecs_to_jiffies(WL_SAE_START_FALLBACK_MS));
 		}
@@ -1621,6 +1628,7 @@ wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev, u16 reason_c
 
 	wl_sae.last_disc = jiffies;
 	wl_sae.armed = 0;       /* disarm SAE hooks on disconnect */
+	WRITE_ONCE(wl_sae.external_auth_started, false);
 	wl_re_pmf_stop();
 	if (wl_sae.inited) {
 		cancel_delayed_work_sync(&wl_sae.assoc_wd);
@@ -2591,6 +2599,7 @@ wl_cfg80211_external_auth(struct wiphy *wiphy, struct net_device *dev,
 			                        WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
 	}
 	wl_sae.armed = 0;       /* SAE done -> disarm the RX hook (no more auth frames) */
+	WRITE_ONCE(wl_sae.external_auth_started, false);
 	return 0;
 }
 
@@ -3357,7 +3366,8 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 					 * glue->blob->glue wrapped-call nest (across unpatched return thunks)
 					 * that hard-locks the kernel on the confirm frame. Keeping the blob
 					 * entirely out of the SAE auth exchange is the clean architecture. */
-					if (wl_sae.dev->ieee80211_ptr) {
+					/* The placeholder reply precedes START; stale supplicant state can abort a rejoin. */
+					if (READ_ONCE(wl_sae.external_auth_started) && wl_sae.dev->ieee80211_ptr) {
 						bool ok = cfg80211_rx_mgmt(wl_sae.dev->ieee80211_ptr,
 						                           wl_sae.freq ? wl_sae.freq : 2447, 0, f, flen, 0);
 						re_log("re: forwarded SAE frame -> userspace, delivered=%d\n", ok);

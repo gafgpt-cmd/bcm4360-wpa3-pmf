@@ -7,6 +7,7 @@ import tempfile
 repo = Path(__file__).resolve().parent.parent
 source = (repo / "wl-src/src/wl/sys/wl_cfg80211_hybrid.c").read_text(encoding="utf-8")
 functions = [
+    (source, "static void wl_sae_ext_auth_work("),
     (source, "static unsigned int wl_re_pmf_stop("),
     (source, "static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why)\n{"),
     (source, "static bool wl_re_pmf_rx("),
