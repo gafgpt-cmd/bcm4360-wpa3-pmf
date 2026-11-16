@@ -2,22 +2,22 @@
 
 ## Required gates
 
-- GPT Astra: changed-source review completed; identified an RX protocol-version bypass.
-  Fixed in `bdf1fac` with executable regressions. Recheck refused by provider;
-  approval remains INCOMPLETE. Do not retry or rephrase to evade the refusal.
-- OpenCode Kimi K3.1: INCOMPLETE. Provider quota stopped the review.
-- no-mistakes: first local run passed with live-validation override.
-  Follow-up reviewer stopped producing output; attempt cancelled through the CLI.
-  No pipeline fixes lost. SAE/RX follow-up requires complete revalidation.
-- Gitleaks: prior local scan and synthetic-credential detection control passed.
+- GPT Astra: WAIVED by owner on 2026-11-16. Earlier review found the
+  RX protocol-version defect, fixed in `bdf1fac`; final recheck was refused.
+- OpenCode Kimi K3.1: WAIVED by owner on 2026-11-16. Quota stopped its review.
+  Neither waiver counts as model approval. No further named-model review required.
+- no-mistakes: run `01M7JZQCDAHF5868KVDGD7DG0S` completed through source push
+  at `88fae2f`; no review findings. Live-validation exception remains recorded.
+- Gitleaks: directory and 25-commit history scans passed; detection control passed.
 - CI evidence: [Remote source checks](#remote-source-checks).
-  Final pipeline source still requires the full configured command mirror;
-  it does not replace Astra or Kimi.
+  Full configured commands passed on published `88fae2f`; external source status green.
+  Actions had no eligible runner; its unstarted run was cancelled.
 - Live validation: pending; see the protocol and results below.
 
-No deployment while required pre-deployment gates remain open. Local checks are not
-independent-review approval or hardware evidence. No upstream PR before genuine live validation.
-Never create READY_FOR_TRIAL while approvals remain incomplete.
+The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
+Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
+Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
+Agent-led trials also require a separately verified physical uplink.
 Publication scope: feature-branch source only; no main push, merge, upstream PR,
 proprietary blob or generated module publication.
 
