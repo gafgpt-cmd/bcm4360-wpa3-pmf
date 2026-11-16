@@ -16,9 +16,10 @@
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
 Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
 Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
-It was revoked after the failed first trial. Refresh bundle helpers and hashes,
-then re-enable the approved retry only after source gates pass.
-Agent-led trials also require a separately verified physical uplink.
+Rebuild the phase-guard candidate and refresh bundle hashes after source gates pass.
+Trials are user-run; keep the verified USB tether connected throughout.
+The source pipeline must not operate the radio, use root/sudo, restart services,
+load/unload modules, or change network profiles or passwords.
 Publication scope: feature-branch source only; no main push, merge, upstream PR,
 proprietary blob or generated module publication.
 
@@ -51,8 +52,7 @@ Record date, source commit, module SHA-256, kernel, chipset and AP security mode
 Never record passwords, keys or full connection profiles.
 Use the prepared temporary bundle. Keep the original module backup.
 Run from a local terminal. Save work; expect a brief Wi-Fi interruption.
-Agent-led radio tests require a separately verified Ethernet or USB-tether uplink.
-Never switch Wi-Fi or unload the module while it is the agent's sole connection.
+Trial authorization and uplink requirement: [Required gates](#required-gates).
 
 1. Record stock baseline: link state, security mode, gateway reachability.
 2. Verify bundle with trial.sh --check.
@@ -92,13 +92,12 @@ PMF status was not captured while connected. VPN blocked a Wi-Fi gateway probe.
 No throughput, wrong/right password, weak-signal or full transition-matrix pass.
 The new phase guard requires another gated build and hardware trial.
 
-Kernel logs show cfg80211 initialized again during both module swaps.
-The helpers used recursive `modprobe -r`; it may remove unused dependencies.
-Revised lifecycle: [Temporary trial bundle](LOCAL.md#temporary-trial-bundle).
-No before/after control-family IDs were captured; an ID mismatch was not measured.
+First-trial logs showed cfg80211 reinitialization during both swaps with the old
+recursive `modprobe -r` helpers. No control-family ID mismatch was measured.
 Reference: [kmod removal semantics](https://github.com/kmod-project/kmod/blob/master/man/modprobe.8.scd).
-The executable recovery regression rejects dependency teardown during either swap.
-It fails before this change. Revised helpers still require another live trial.
+Current lifecycle: [Temporary trial bundle](LOCAL.md#temporary-trial-bundle).
+Corrected-helper live results are recorded above; the recovery regression covers
+dependency preservation during both swaps.
 
 ## Review regression verification
 
