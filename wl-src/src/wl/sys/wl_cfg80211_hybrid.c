@@ -3348,13 +3348,13 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 				       q, algv, f[26] | (f[27] << 8), stv, flen,
 				       algv == 3 ? " (consume)" : "");
 				if (algv == 3) {
-					/* SAE auth frame: forward valid (status==0) ones to wpa_supplicant,
+					/* Forward every SAE status for wpa_supplicant to interpret,
 					 * then CONSUME the pkt -- do NOT hand it to the firmware's wlc_recv.
 					 * Letting the blob process SAE auth frames runs its auth FSM + a deep
 					 * glue->blob->glue wrapped-call nest (across unpatched return thunks)
 					 * that hard-locks the kernel on the confirm frame. Keeping the blob
 					 * entirely out of the SAE auth exchange is the clean architecture. */
-					if (stv == 0 && wl_sae.dev->ieee80211_ptr) {
+					if (wl_sae.dev->ieee80211_ptr) {
 						bool ok = cfg80211_rx_mgmt(wl_sae.dev->ieee80211_ptr,
 						                           wl_sae.freq ? wl_sae.freq : 2447, 0, f, flen, 0);
 						re_log("re: forwarded SAE frame -> userspace, delivered=%d\n", ok);

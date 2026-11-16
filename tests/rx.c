@@ -36,7 +36,7 @@ static u64 wl_mgmt_pn;
 static bool wl_re_fast_ok = true;
 static void *wl_re_fast_tfm;
 
-static unsigned int passed, dropped, disconnected, responses;
+static unsigned int passed, dropped, disconnected, responses, auth_delivered;
 static u16 disconnect_reason;
 static u8 last_pass[128], last_response[44];
 static const u8 tk[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -109,7 +109,12 @@ static void wlc_recv(void *wlc, void *pkt)
     passed++;
 }
 static bool cfg80211_rx_mgmt(void *dev, unsigned int freq, int sig, const u8 *f, unsigned int len, int flags)
-{ (void)dev; (void)freq; (void)sig; (void)f; (void)len; (void)flags; assert(false); return false; }
+{
+    (void)dev; (void)freq; (void)sig; (void)flags;
+    assert(len == 46 && f[0] == 0xb0 && f[24] == 3);
+    auth_delivered++;
+    return true;
+}
 static void (*during_setup)(void), (*during_probe)(void), (*during_decrypt)(void);
 static void inject(void (**hook)(void))
 {
@@ -222,7 +227,8 @@ static void reset(void)
     wl_sae.dev = &dev;
     wl_sae.pmf_active = wl_sae.tk_set = true;
     wl_mgmt_pn = 0; wl_key_epoch = 0; wl_re_fast_ok = true;
-    passed = dropped = disconnected = responses = 0;
+    passed = dropped = disconnected = responses = auth_delivered = 0;
+    dev.ieee80211_ptr = NULL;
     priv.status = 1;
     during_setup = during_probe = during_decrypt = NULL;
     memset(wl_bip_keys, 0, sizeof(wl_bip_keys));
@@ -392,6 +398,25 @@ int main(void)
     reset(); wl_sae.pmf_active = false;
     receive(0xd0, 1, ba, sizeof(ba), false);
     assert(passed == 1 && wl_mgmt_pn == 0);
+    const u16 statuses[] = { 0, 76, 77, 126, 127 };
+    unsigned int failures = 0;
+    for (unsigned int i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++) {
+        reset();
+        wl_sae.armed = true; wl_sae.pmf_active = false;
+        dev.ieee80211_ptr = &dev;
+        memset(storage, 0, sizeof(storage));
+        u8 *f = storage + 20;
+        f[0] = 0xb0;
+        memcpy(f + 4, dev.dev_addr, 6);
+        memcpy(f + 10, ap, 6); memcpy(f + 16, ap, 6);
+        f[24] = 3; f[26] = 1;
+        f[28] = (u8)statuses[i]; f[29] = statuses[i] >> 8;
+        packet.len = 70;
+        __wrap_wlc_recv(wlc, &packet);
+        printf("SAE status %u: delivered=%u expected=1\n", statuses[i], auth_delivered);
+        failures += auth_delivered != 1 || passed != 0 || dropped != 1;
+    }
+    if (failures) return 1;
     puts("RX: authenticated burst effects, queued/running workers, group/unicast teardown, session/key boundaries, replay and WPA2 pass-through passed");
     return 0;
 }

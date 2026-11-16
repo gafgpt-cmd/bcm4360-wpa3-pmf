@@ -4,8 +4,9 @@
 
 - GPT Astra: INCOMPLETE. Provider blocked further review after identifying the TX rekey race;
   the race was fixed, but the required independent review remains open.
-- OpenCode Kimi K3.1: pending independent review.
-- no-mistakes: pending completion of the current run.
+- OpenCode Kimi K3.1: INCOMPLETE. Provider quota stopped the review.
+- no-mistakes: previous local run passed with live-validation override;
+  follow-up SAE fix requires a new run.
 - Gitleaks: prior local scan and synthetic-credential detection control passed.
 - GitHub CI: pending; no self-hosted runner is available for the new repository.
   A full local mirror of the configured test and lint commands may satisfy the CI gate;
@@ -38,6 +39,8 @@ Record date, source commit, module SHA-256, kernel, chipset and AP security mode
 Never record passwords, keys or full connection profiles.
 Use the prepared temporary bundle. Keep the original module backup.
 Run from a local terminal. Save work; expect a brief Wi-Fi interruption.
+Agent-led radio tests require a separately verified Ethernet or USB-tether uplink.
+Never switch Wi-Fi or unload the module while it is the agent's sole connection.
 
 1. Record stock baseline: link state, security mode, gateway reachability.
 2. Verify bundle with trial.sh --check.
@@ -47,7 +50,9 @@ Run from a local terminal. Save work; expect a brief Wi-Fi interruption.
 6. Confirm automatic stock restoration; repeat manual restore as a separate test.
 7. Reboot; confirm installed stock module and reconnect.
 8. After the short trial passes, design a separately approved longer test:
-   AP group rekey, reconnect, wrong password, sustained traffic, suspend/resume.
+   AP group rekey, reconnect, wrong password, sustained traffic, suspend/resume;
+   weak-signal loss/return and recovery without reboot.
+   Test the phone hotspot separately: open, WPA2, WPA3, transition; 2.4/5 GHz.
 9. Verify actual protected traffic with an independent monitor-mode capture device.
    Check valid group teardown, forged MIC rejection and replay rejection on-air.
 
@@ -106,3 +111,14 @@ and group teardown.
 Scheduling hooks exercise deterministic interleavings; this is not live kernel
 concurrency or hardware evidence. No complete suite, remote CI or deployment ran
 in this review phase.
+
+## SAE status regression
+
+`python3 tests/rx.py` executes the actual RX wrapper.
+SAE statuses 0, 76, 77, 126 and 127 must reach cfg80211 exactly once;
+the proprietary blob must receive none. Oracle: supplicant's
+[SAE state machine](https://android.googlesource.com/platform/external/wpa_supplicant_8/+/6d755ae3182b871a753223d842aeed5e5f1002b8/wpa_supplicant/sme.c).
+The status-zero filter dropped anti-clogging, group negotiation, H2E and SAE-PK.
+Before the fix: only status 0 delivered. After: all five delivered.
+Full configured test and lint commands passed locally after this change.
+This demonstrates frame delivery, not successful hotspot association.
