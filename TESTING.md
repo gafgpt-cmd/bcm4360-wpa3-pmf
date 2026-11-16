@@ -6,17 +6,22 @@
   RX protocol-version defect, fixed in `bdf1fac`; final recheck was refused.
 - OpenCode Kimi K3.1: WAIVED by owner on 2026-11-16. Quota stopped its review.
   Neither waiver counts as model approval. No further named-model review required.
-- no-mistakes: run `01M7JZQCDAHF5868KVDGD7DG0S` completed through source push
-  at `88fae2f`; no source review findings. Passed-with-override solely for
-  inconclusive live validation; hardware validation remains pending.
+- no-mistakes: `2db36bd` passed source gates with a live-validation exception
+  and exact configured command mirror. The provisional-mode change at `91bdd32`
+  is under review in run `01M7KAH2BSMPS78HW57FMK8T11`; no final pass claimed.
 - Gitleaks: directory and 25-commit history scans passed; detection control passed.
 - CI evidence: [Remote source checks](#remote-source-checks).
-- Live validation: pending; see the protocol and results below.
+- Live validation: negotiated SAE/PMF/BIP, explicit reconnect, radio off/on and
+  automatic stock restoration passed on Nov 17. Remaining hardware checks below.
 
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
 Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
 Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
-Rebuild the phase-guard candidate and refresh bundle hashes after source gates pass.
+The corrected phase-guard candidate is already built and live tested below.
+No driver/build inputs changed for provisional mode; that candidate remains exact.
+Rebuild and refresh bundle hashes only after driver/build inputs change.
+Source-gate approval permits helper staging and a user-run longer temporary trial;
+it does not establish complete hardware approval or permit permanent installation.
 Trials are user-run; keep the verified USB tether connected throughout.
 The source pipeline must not operate the radio, use root/sudo, restart services,
 load/unload modules, or change network profiles or passwords.
@@ -39,13 +44,13 @@ proprietary blob or generated module publication.
   preservation, dependency loading/failure, metadata failure, wrong saved identity,
   tamper, kernel mismatch, busy-unload refusal, default 120-second and provisional
   3600-second durations, provisional timer ordering/failure cleanup and invalid arguments.
-- Exact-kernel module build: `bdf1fac` passed against 7.2.15-1-omarchy,
-  using a source archive and unchanged distribution blob outside Git.
-  Module SHA-256: `5a47ba7af2f4ad44196035a49105af7d4948ad98e79b034f3e77e9e28bfb9da8`.
+- Current corrected candidate: `2D9C69401535FF29CAC7F14`, kernel `7.2.15-1-omarchy`.
+  Module SHA-256: `11e16c7991e4946a8c19487cf8d96b15c79776c0edb926f31a0a077c1882426d`.
+  Built with the unchanged distribution blob outside Git; Nov 17 live results below.
   Rebuild after any driver or build-source change.
-- Hardware trials: initial SAE connection succeeded; reconnect failed. See [Live results](#live-results).
-  Low-signal stalls and GrapheneOS Pixel 9 Pro hotspot failures are reported;
-  hardware causes remain hypotheses. Neither has an established fix.
+- Hardware trials: corrected candidate passed SAE/PMF negotiation and two reconnect
+  scenarios after earlier reconnect failures. See [Live results](#live-results).
+  Low-signal stalls remain unverified; hardware causes remain hypotheses.
 
 ## Hardware test protocol
 
@@ -84,14 +89,30 @@ No WPA3/PMF, phone-hotspot or weak-signal result established by this trial.
 
 Corrected helpers: secured normal-network authentication and DHCP succeeded.
 Automatic stock restore succeeded; no shared cfg80211 reload observed.
-Two later hotspot trials completed SAE, association, CCMP key negotiation and DHCP.
+Before the phase guard, two hotspot trials completed SAE, association,
+CCMP key negotiation and DHCP.
 Both failed after an explicit disconnect/reconnect; repeated status77 rejections.
 Debug trace: the placeholder response reached supplicant before external-auth START,
 triggering failure callbacks and aborting the join. A later START returned EINVAL.
 Stock restored automatically and reconnected; USB tether remained available.
-PMF status was not captured while connected. VPN blocked a Wi-Fi gateway probe.
-No throughput, wrong/right password, weak-signal or full transition-matrix pass.
-The new phase guard requires another gated build and hardware trial.
+Those trials did not capture connected PMF status. VPN blocked a Wi-Fi gateway probe.
+
+Corrected phase-guard candidate, Nov 17, 2026 (local times), kernel `7.2.15-1-omarchy`:
+
+- 00:01:32: candidate loaded; immediate capture showed `key_mgmt=SAE`, `pmf=2`,
+  `mgmt_group_cipher=BIP`, `wpa_state=COMPLETED`.
+- 00:02:04: explicit disconnect; fresh SAE, association and DHCP passed at
+  00:02:13 on the other hotspot band.
+- 00:03:07: fresh SAE success after Wi-Fi radio off/on.
+- 00:03:33: automatic stock restoration passed; stock normal AP reactivated.
+  USB tether remained online.
+
+Owner-supplied sanitized evidence establishes negotiated SAE+PMF and these two
+reconnect scenarios. Private raw logs remain on the laptop; no network identifiers published.
+VPN blocked interface-bound gateway ping; candidate data-plane success is unverified.
+No on-air forgery/replay, wrong/right password, sustained traffic, weak-signal
+or full transition-matrix pass. Actual 3600-second timer/runtime mode remains
+to be live tested. No permanent installation or on-air security guarantee.
 
 First-trial logs showed cfg80211 reinitialization during both swaps with the old
 recursive `modprobe -r` helpers. No control-family ID mismatch was measured.
@@ -188,6 +209,8 @@ checks ran in fresh host scratch with installed tools. No radio operations.
 Follow-up commits require their own remote checks.
 Published `88fae2f`: full configured test/lint command mirror passed on the connected host.
 External `ci/offline-source` status was green for those commands only.
+Later phase-guard source gates at `2db36bd` passed with the exact configured
+command mirror and live exception. Provisional-mode gates remain in progress.
 Repository has no assigned Actions runner. Fleet Actions admission is private-only;
 the documented local/remote command mirror does not claim an Actions run.
 Actions had no eligible runner; its unstarted run was cancelled.
