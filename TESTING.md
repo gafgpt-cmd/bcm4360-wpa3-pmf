@@ -41,7 +41,7 @@ proprietary blob or generated module publication.
   using a source archive and unchanged distribution blob outside Git.
   Module SHA-256: `5a47ba7af2f4ad44196035a49105af7d4948ad98e79b034f3e77e9e28bfb9da8`.
   Rebuild after any driver or build-source change.
-- Hardware trial: association failed; see [Live results](#live-results).
+- Hardware trials: initial SAE connection succeeded; reconnect failed. See [Live results](#live-results).
   Low-signal stalls and GrapheneOS Pixel 9 Pro hotspot failures are reported;
   hardware causes remain hypotheses. Neither has an established fix.
 
@@ -80,6 +80,17 @@ Wi-Fi remained unavailable after restore. Restarting the supplicant and cycling
 NetworkManager management of the Wi-Fi device restored stock association and DHCP.
 USB tethering kept the agent online; ordinary HTTPS returned200.
 No WPA3/PMF, phone-hotspot or weak-signal result established by this trial.
+
+Corrected helpers: secured normal-network authentication and DHCP succeeded.
+Automatic stock restore succeeded; no shared cfg80211 reload observed.
+Two later hotspot trials completed SAE, association, CCMP key negotiation and DHCP.
+Both failed after an explicit disconnect/reconnect; repeated status77 rejections.
+Debug trace: the placeholder response reached supplicant before external-auth START,
+triggering failure callbacks and aborting the join. A later START returned EINVAL.
+Stock restored automatically and reconnected; USB tether remained available.
+PMF status was not captured while connected. VPN blocked a Wi-Fi gateway probe.
+No throughput, wrong/right password, weak-signal or full transition-matrix pass.
+The new phase guard requires another gated build and hardware trial.
 
 Kernel logs show cfg80211 initialized again during both module swaps.
 The helpers used recursive `modprobe -r`; it may remove unused dependencies.
@@ -142,13 +153,18 @@ in this review phase.
 ## SAE status regression
 
 `python3 tests/rx.py` executes the actual RX wrapper.
-SAE statuses 0, 76, 77, 126 and 127 must reach cfg80211 exactly once;
+After external-auth START, SAE statuses 0, 76, 77, 126 and 127 must reach cfg80211 exactly once;
 the proprietary blob must receive none. Oracle: supplicant's
 [SAE state machine](https://android.googlesource.com/platform/external/wpa_supplicant_8/+/6d755ae3182b871a753223d842aeed5e5f1002b8/wpa_supplicant/sme.c).
 The status-zero filter dropped anti-clogging, group negotiation, H2E and SAE-PK.
 Before the fix: only status 0 delivered. After: all five delivered.
 Full configured test and lint commands passed locally after this change.
 This demonstrates frame delivery, not successful hotspot association.
+
+Reconnect regression: consume pre-START replies without notifying supplicant.
+The RX executable fails before this phase guard and passes afterward.
+It still delivers every listed status after START. The actual START worker is
+also executed: disarmed/missing device sends nothing; request failure closes RX delivery.
 
 ## Astra RX version regression
 
