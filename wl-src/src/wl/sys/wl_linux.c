@@ -187,11 +187,11 @@ void *wl_re_dev_wlc(struct net_device *dev, void **osh_out)
 /* Free an RX pkt the same way the firmware's wlc_recv would at its tail
  * (osl_pktfree(osh, pkt, FALSE) -> dev_kfree_skb). Lets __wrap_wlc_recv CONSUME
  * SAE auth frames instead of handing them to the blob's auth FSM. */
-void wl_re_pktfree(struct net_device *dev, void *pkt)
+void wl_re_pktfree(struct net_device *dev, void *pkt, bool send)
 {
 	wl_info_t *wl = WL_INFO(dev);
 	if (wl && wl->osh && pkt)
-		PKTFREE(wl->osh, pkt, FALSE);
+		PKTFREE(wl->osh, pkt, send);
 }
 
 /* Look up the CURRENT scb for an AP MAC (survives disconnect/reconnect, unlike a captured

@@ -42,6 +42,36 @@
 #include <proto/802.11.h>
 #include <wl_cfg80211_hybrid.h>
 #include <wl_linux.h>
+#include <crypto/aes-cbc-macs.h>
+#include <crypto/algapi.h>
+#include "wl_pmf.h"
+
+static struct wl_pmf_key wl_bip_keys[2];
+static DEFINE_SPINLOCK(wl_bip_lock);
+static DEFINE_MUTEX(wl_saq_lock);
+static atomic_t wl_key_epoch = ATOMIC_INIT(0);
+static u64 wl_mgmt_pn;
+
+static bool wl_mgmt_replay_accept(u64 pn, int epoch)
+{
+	unsigned long flags;
+	bool ok;
+	spin_lock_irqsave(&wl_bip_lock, flags);
+	ok = !(epoch & 1) && epoch == atomic_read(&wl_key_epoch) &&
+		wl_pmf_replay_accept(&wl_mgmt_pn, pn);
+	spin_unlock_irqrestore(&wl_bip_lock, flags);
+	return ok;
+}
+
+static void wl_bip_reset(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&wl_bip_lock, flags);
+	memzero_explicit(wl_bip_keys, sizeof(wl_bip_keys));
+	wl_mgmt_pn = 0;
+	atomic_add(2, &wl_key_epoch);
+	spin_unlock_irqrestore(&wl_bip_lock, flags);
+}
 
 #define EVENT_TYPE(e) dtoh32((e)->event_type)
 #define EVENT_FLAGS(e) dtoh16((e)->flags)
@@ -1162,13 +1192,9 @@ static struct {
 	                     * SAE+MFP requirement and the userspace 4-way RSN-IE check. */
 	u16 assoc_ie_len;
 	bool pmf_active;    /* 802.11w MFP negotiated + IGTK installed -> enforce SW PMF on RX */
-	u8  igtk[16];       /* IGTK (BIP-CMAC-128 key) captured from .add_key for MMIE verify */
-	u8  igtk_keyid;     /* IGTK key id (4 or 5) */
-	u8  igtk_ipn[6];    /* IGTK packet number (replay) */
 	u8  tk[16];         /* pairwise CCMP temporal key (PTK TK) for SW mgmt-frame crypto */
 	bool tk_set;
 	atomic64_t tx_pn;   /* our TX PN for SW-protected mgmt frames (SA-Query Response, Block Ack) */
-	u64 rx_ba_pn;       /* last accepted PN of the AP's protected Block-Ack action frames */
 	struct delayed_work assoc_wd;  /* association watchdog: see wl_sae_assoc_wd_work() */
 	struct work_struct saq_work;   /* deferred SA-Query handler (RX path is atomic) */
 	u8  saq_frame[320];
@@ -1184,7 +1210,6 @@ static struct {
 	bool saq_pending;
 	u16  saq_tid;
 	int  saq_tries;
-	u64  rx_mgmt_pn;               /* last accepted PN of the AP's protected deauth/disassoc */
 	bool stub_seen;     /* the blob has sent its own stub auth frame for this join */
 	atomic_t txfail_cnt;           /* WLC_E_TXFAIL events seen (a frame the AP never ACKed) */
 	u32  assoc_status;             /* 802.11 status code of the last association response (WLC_E_ASSOC) */
@@ -1210,7 +1235,8 @@ static void wl_re_dd_work(struct work_struct *w);
 static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why);
 static void wl_re_saq_chk_work(struct work_struct *w);
 void wl_re_link_tick(struct net_device *dev, unsigned long tx, unsigned long retry);
-static void wl_re_fast_key(const u8 *tk);
+static void wl_re_fast_key(const u8 *tk, bool changed);
+extern void wl_re_pktfree(struct net_device *dev, void *pkt, bool send);
 static void wl_re_crypto_exit(void);
 
 /* After the host SAE succeeds we drive the blob into association (wl_re_drive_assoc). With this
@@ -1397,6 +1423,11 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	 * verbatim in the SAE assoc-req (see wl_re_drive_assoc). */
 	wl_sae.assoc_ie_len = 0;
 	wl_sae.pmf_active = false;   /* re-armed when the IGTK installs after the 4-way */
+	if (wl_sae.inited) {
+		cancel_work_sync(&wl_sae.saq_work);
+		cancel_work_sync(&wl_sae.dd_work);
+	}
+	wl_bip_reset();
 	if (sme->ie && sme->ie_len) {
 		/* Only the RSN (+RSNX) elements: the blob pastes this buffer into its assoc request next to its
 		 * own capability IEs, so wpa_supplicant's Extended Capabilities / Supported Operating Classes
@@ -1446,8 +1477,6 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	cancel_delayed_work_sync(&wl_sae.assoc_wd);   /* stale watchdog of a previous attempt */
 	cancel_delayed_work_sync(&wl_sae.saq_chk);
 	wl_sae.saq_pending = false;
-	wl_sae.rx_mgmt_pn = 0;
-	wl_sae.rx_ba_pn = 0;
 	wl_re_release_assoc_ie();   /* a WPA2 connect must not reuse the previous SAE RSN IE */
 	wl_sae.sae_conn = wl_sme_is_sae(sme);
 	wl_sae.sae_ok = false;
@@ -1795,29 +1824,38 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 
 	WL_DBG(("key index %u    len %u\n", (unsigned)key_idx, params->key_len));
 
-	/* 802.11w IGTK (BIP-CMAC-128, key idx 4/5): the BCM4360 HW key engine has no BIP slot
-	 * and the blob caps key index at 3, so WLC_SET_KEY returns -22; wpa_supplicant then aborts
-	 * the connection during GROUP_HANDSHAKE (reason=1). Accept it in software (no HW install)
-	 * so the link comes up -- the PTK/GTK (data path) are installed normally. Management-frame
-	 * protection is SW/best-effort (M3.4). */
 	if (params->cipher == WLAN_CIPHER_SUITE_AES_CMAC || key_idx >= 4) {
-		if (params->key && params->key_len == 16) {
-			memcpy(wl_sae.igtk, params->key, 16);
-			wl_sae.igtk_keyid = key_idx;
-			if (params->seq && params->seq_len >= 6)
-				memcpy(wl_sae.igtk_ipn, params->seq, 6);
-			wl_sae.pmf_active = true;   /* MFP is now active -> enforce SW PMF on RX */
-		}
-		re_log("re add_key: IGTK/BIP (idx=%u cipher=0x%x) stored SW; PMF active (no HW BIP)\n",
-		        (unsigned)key_idx, params->cipher);
-		return 0;
+		unsigned long flags;
+		if (params->cipher != WLAN_CIPHER_SUITE_AES_CMAC || pairwise || !wl_sae.sae_conn)
+			return -EOPNOTSUPP;
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		err = wl_pmf_install(wl_bip_keys, key_idx, params->key, params->key_len,
+				     params->seq, params->seq_len);
+		if (!err)
+			WRITE_ONCE(wl_sae.pmf_active, true);
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		return err;
 	}
 	/* Capture the pairwise CCMP temporal key (PTK TK) for the SW SA-Query crypto. */
 	if (params->cipher == WLAN_CIPHER_SUITE_CCMP && pairwise &&
 	    params->key && params->key_len == 16) {
+		unsigned long flags;
+		bool changed;
+		mutex_lock(&wl_saq_lock);
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		atomic_inc(&wl_key_epoch);
+		changed = !wl_sae.tk_set || crypto_memneq(wl_sae.tk, params->key, 16);
+		if (changed) {
+			wl_mgmt_pn = 0;
+		}
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
 		memcpy(wl_sae.tk, params->key, 16);
 		wl_sae.tk_set = true;
-		wl_re_fast_key(wl_sae.tk);
+		wl_re_fast_key(wl_sae.tk, changed);
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		atomic_inc(&wl_key_epoch);
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		mutex_unlock(&wl_saq_lock);
 		re_log("re add_key: captured pairwise CCMP TK for SW mgmt crypto\n");
 		wl_sae.ptk_done = true;
 		cancel_delayed_work(&wl_sae.hs_wd);
@@ -1962,6 +2000,15 @@ wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
 	s32 err = 0;
 
 	WL_DBG(("key index (%d)\n", key_idx));
+	if (key_idx >= 4) {
+		unsigned long flags;
+		if (key_idx > 5 || pairwise)
+			return -EINVAL;
+		spin_lock_irqsave(&wl_bip_lock, flags);
+		memzero_explicit(&wl_bip_keys[key_idx - 4], sizeof(wl_bip_keys[0]));
+		spin_unlock_irqrestore(&wl_bip_lock, flags);
+		return 0;
+	}
 
 	memset(&key, 0, sizeof(key));
 
@@ -2651,7 +2698,6 @@ static void wl_re_ccmp_blocks(const u8 *h, const u8 *pn, u8 *nonce, u8 *aad)
 }
 
 static struct crypto_aead *wl_saq_tfm;   /* cached AES-CCM tfm (alloc once; serialized use) */
-static DEFINE_MUTEX(wl_saq_lock);        /* tfm + its key are shared by the SA-Query worker and the deauth */
 
 /* Lazily allocate the AES-CCM tfm once (process context) and key it with the current TK (cheap, done
  * per call). Caller holds wl_saq_lock. */
@@ -2725,7 +2771,7 @@ static struct crypto_aead *wl_re_fast_tfm;
 static DEFINE_SPINLOCK(wl_re_fast_lock);
 static bool wl_re_fast_ok;
 
-static void wl_re_fast_key(const u8 *tk)
+static void wl_re_fast_key(const u8 *tk, bool changed)
 {
 	unsigned long fl;
 
@@ -2741,6 +2787,8 @@ static void wl_re_fast_key(const u8 *tk)
 	}
 	spin_lock_irqsave(&wl_re_fast_lock, fl);
 	wl_re_fast_ok = crypto_aead_setkey(wl_re_fast_tfm, tk, 16) == 0;
+	if (changed)
+		atomic64_set(&wl_sae.tx_pn, 1);
 	spin_unlock_irqrestore(&wl_re_fast_lock, fl);
 }
 
@@ -2776,6 +2824,29 @@ static int wl_re_ccm_fast(bool enc, const u8 *nonce, const u8 *aad, u8 *data, un
 	return ret;
 }
 
+static int wl_re_ccm_fast_tx(const u8 *header, u8 pn[6], u8 *data, unsigned int len)
+{
+	unsigned long flags;
+	u8 nonce[13], aad[22];
+	u64 n;
+	int ret = -ENOKEY;
+	spin_lock_irqsave(&wl_re_fast_lock, flags);
+	if (!wl_re_fast_ok)
+		goto out;
+	n = (u64)atomic64_fetch_inc(&wl_sae.tx_pn);
+	if (!n || n > 0xffffffffffffULL) {
+		ret = -EOVERFLOW;
+		goto out;
+	}
+	pn[0] = n; pn[1] = n >> 8; pn[2] = n >> 16;
+	pn[3] = n >> 24; pn[4] = n >> 32; pn[5] = n >> 40;
+	wl_re_ccmp_blocks(header, pn, nonce, aad);
+	ret = wl_re_ccm_with(wl_re_fast_tfm, GFP_ATOMIC, true, nonce, aad, 22, data, len);
+out:
+	spin_unlock_irqrestore(&wl_re_fast_lock, flags);
+	return ret;
+}
+
 static inline u64 wl_re_ccmp_pn(const u8 *p)   /* PN from the 8-byte CCMP header */
 {
 	return (u64)p[0] | (u64)p[1] << 8 | (u64)p[4] << 16 | (u64)p[5] << 24 | (u64)p[6] << 32 | (u64)p[7] << 40;
@@ -2791,6 +2862,7 @@ static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
 	u8 nonce[13], aad[22], pn[6], pt[56];
 	int ctlen = (int)flen - 4 - 24 - 8 - 8;
 	u64 pn64;
+	int epoch = atomic_read(&wl_key_epoch);
 
 	if (re_pmf_ba < 2 || !wl_sae.tk_set || ctlen < 4 || ctlen > 48 || !(p[27] & 0x20) ||
 	    memcmp(p + 16, wl_sae.bssid, 6) != 0)
@@ -2801,12 +2873,9 @@ static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
 	if (wl_re_ccm_fast(false, nonce, aad, pt, ctlen) != 0 || pt[0] != 3)
 		return 0;                       /* not decryptable here, or not Block Ack: SA-Query path */
 	pn64 = wl_re_ccmp_pn(p + 24);
-	if (pn64 <= wl_sae.rx_ba_pn) {
-		re_log("re ba: replayed protected BA frame pn=%llu <= %llu -> dropped\n",
-		       (unsigned long long)pn64, (unsigned long long)wl_sae.rx_ba_pn);
+	if (!wl_mgmt_replay_accept(pn64, epoch)) {
 		return -1;
 	}
-	wl_sae.rx_ba_pn = pn64;
 	if (re_verbose) {
 		u16 st = q >= 6 ? skb->data[4] | (skb->data[5] << 8) : 0;
 
@@ -2830,15 +2899,14 @@ static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
 
 /* TX, atomic context, from the blob's wlc_sendmgmt(): protect the blob's own Block-Ack action
  * frame (ADDBA req/resp, DELBA) to the AP in place, like the AP does under PMF. */
-static void wl_re_ba_tx(struct sk_buff *skb)
+static int wl_re_ba_tx(struct sk_buff *skb)
 {
-	u8 nonce[13], aad[22], pn[6], pt[24];
+	u8 pn[6], pt[24];
 	unsigned int q, lim, blen;
-	u64 txpn;
 	u8 *p;
 
 	if (!skb || !wl_sae.dev || skb->len < 24 + 6 || skb->len > 160)
-		return;
+		return 0;
 	lim = skb->len - (24 + 6);
 	if (lim > 64)
 		lim = 64;
@@ -2851,38 +2919,33 @@ static void wl_re_ba_tx(struct sk_buff *skb)
 			break;
 	}
 	if (q > lim)
-		return;
+		return 0;
 	blen = skb->len - q - 24;
 	if (blen < 4 || blen > 16)
-		return;
+		return -EMSGSIZE;
 	if (skb_tailroom(skb) < 16 && pskb_expand_head(skb, 0, 16, GFP_ATOMIC)) {
-		re_log("re ba: no tailroom for the CCMP MIC, frame sent unprotected\n");
-		return;
+		return -ENOMEM;
 	}
 	p = skb->data + q;
-	txpn = (u64)atomic64_fetch_inc(&wl_sae.tx_pn);
-	pn[0] = txpn & 0xff; pn[1] = (txpn >> 8) & 0xff; pn[2] = (txpn >> 16) & 0xff;
-	pn[3] = (txpn >> 24) & 0xff; pn[4] = (txpn >> 32) & 0xff; pn[5] = (txpn >> 40) & 0xff;
-	wl_re_ccmp_blocks(p, pn, nonce, aad);
 	memcpy(pt, p + 24, blen);
-	if (wl_re_ccm_fast(true, nonce, aad, pt, blen) != 0) {
-		re_log("re ba: CCMP encrypt failed, frame sent unprotected\n");
-		return;
-	}
-	re_log("re ba: protecting the blob's BA action act=%u len=%u pn=%llu\n",
-	       p[25], blen, (unsigned long long)txpn);
+	if (wl_re_ccm_fast_tx(p, pn, pt, blen) != 0)
+		return -EIO;
 	p[1] |= 0x40;                                   /* Protected Frame */
 	p[24] = pn[0]; p[25] = pn[1]; p[26] = 0; p[27] = 0x20;   /* CCMP header, key id 0 */
 	p[28] = pn[2]; p[29] = pn[3]; p[30] = pn[4]; p[31] = pn[5];
 	memcpy(p + 32, pt, blen + 8);
 	skb_put(skb, 16);
+	return 0;
 }
 
 extern int wlc_sendmgmt(void *wlc, void *pkt, void *txq, void *scb, long a5, long a6);
 int __wrap_wlc_sendmgmt(void *wlc, void *pkt, void *txq, void *scb, long a5, long a6)
 {
-	if (re_pmf_ba >= 2 && wl_sae.pmf_active && wl_sae.tk_set)
-		wl_re_ba_tx((struct sk_buff *)pkt);
+	if (re_pmf_ba >= 2 && wl_sae.pmf_active && wl_sae.tk_set &&
+	    wl_re_ba_tx((struct sk_buff *)pkt) < 0) {
+		wl_re_pktfree(wl_sae.dev, pkt, true);
+		return 0;
+	}
 	return wlc_sendmgmt(wlc, pkt, txq, scb, a5, a6);
 }
 
@@ -2897,12 +2960,14 @@ static void wl_re_saq_work(struct work_struct *w)
 	unsigned int flen = wl_sae.saq_len;
 	u8 nonce[13], aad[22], pn[6], body[72];
 	int ctlen;
+	int epoch;
 	bool locked = false;
 
 	if (!wl_sae.tk_set || !wl_sae.dev || flen < 24 + 8 + 8 + 4 + 4)
 		goto done;
 	mutex_lock(&wl_saq_lock);
 	locked = true;
+	epoch = atomic_read(&wl_key_epoch);
 	if (wl_re_ccm_setup())
 		goto done;
 	ctlen = (int)flen - 4 /*FCS*/ - 24 - 8 - 8;
@@ -2916,6 +2981,8 @@ static void wl_re_saq_work(struct work_struct *w)
 		re_log("re saq: CCMP decrypt FAILED (ctlen=%d)\n", ctlen);
 		goto done;
 	}
+	if (!wl_mgmt_replay_accept(wl_re_ccmp_pn(f + 24), epoch))
+		goto done;
 	re_log("re saq: decrypted action cat=%u act=%u transid=%02x%02x ctlen=%d\n",
 	       body[0], body[1], ctlen >= 4 ? body[2] : 0, ctlen >= 4 ? body[3] : 0, ctlen);
 	if (ctlen >= 4 && body[0] == 8 && body[1] == 1) {   /* SA-Query Response to our request */
@@ -3172,6 +3239,7 @@ static void wl_re_dd_work(struct work_struct *w)
 	unsigned int flen = wl_sae.dd_len;
 	u8 nonce[13], aad[22], pn[6], buf[2 + 8];
 	u64 pn64;
+	int epoch;
 	bool locked = false;
 	u16 reason;
 
@@ -3187,6 +3255,11 @@ static void wl_re_dd_work(struct work_struct *w)
 	}
 	if (flen < 26)
 		goto done;
+	if (wl_sae.dd_kind == 3) {
+		reason = f[24] | (f[25] << 8);
+		wl_re_assoc_lost(dev, reason, "BIP-verified group deauth/disassoc");
+		goto done;
+	}
 	if (!wl_sae.dd_prot) {
 		reason = f[24] | (f[25] << 8);
 		if (reason == 6 || reason == 7)
@@ -3199,13 +3272,9 @@ static void wl_re_dd_work(struct work_struct *w)
 	pn[0] = f[24]; pn[1] = f[25]; pn[2] = f[28]; pn[3] = f[29]; pn[4] = f[30]; pn[5] = f[31];
 	pn64 = (u64)pn[0] | ((u64)pn[1] << 8) | ((u64)pn[2] << 16) | ((u64)pn[3] << 24) |
 	       ((u64)pn[4] << 32) | ((u64)pn[5] << 40);
-	if (pn64 <= wl_sae.rx_mgmt_pn) {
-		re_log("re: protected deauth/disassoc replayed (pn %llu <= %llu) -> ignored\n",
-		       (unsigned long long)pn64, (unsigned long long)wl_sae.rx_mgmt_pn);
-		goto done;
-	}
 	mutex_lock(&wl_saq_lock);
 	locked = true;
+	epoch = atomic_read(&wl_key_epoch);
 	if (wl_re_ccm_setup())
 		goto done;
 	wl_re_ccmp_blocks(f, pn, nonce, aad);
@@ -3214,7 +3283,8 @@ static void wl_re_dd_work(struct work_struct *w)
 		re_log("re: protected deauth/disassoc: CCMP verify FAILED -> ignored\n");
 		goto done;
 	}
-	wl_sae.rx_mgmt_pn = pn64;
+	if (!wl_mgmt_replay_accept(pn64, epoch))
+		goto done;
 	reason = buf[0] | (buf[1] << 8);
 	mutex_unlock(&wl_saq_lock);
 	locked = false;
@@ -3231,17 +3301,26 @@ done:
  * At wlc_recv entry skb->data points at the d11 rx-header; the 802.11 frame follows at
  * rxoff = *(u32*)(wlc+0x6bc) (+2 if the pad flag rxhdr[0x10]&4 is set). */
 extern void wlc_recv(void *wlc, void *pkt);
-extern void wl_re_pktfree(struct net_device *dev, void *pkt);
 void __wrap_wlc_recv(void *wlc, void *pkt)
 {
 	struct sk_buff *skb = (struct sk_buff *)pkt;
+	u32 frame_off = 0;
+	if ((wl_sae.armed || READ_ONCE(wl_sae.pmf_active)) && skb) {
+		int offset;
+		if (skb_headlen(skb) != skb->len || skb->len < 20)
+			goto drop;
+		/* Verified against wlc_recv in the pinned Broadcom object. */
+		memcpy(&frame_off, (u8 *)wlc + 0x6bc, sizeof(frame_off));
+		offset = wl_pmf_frame_offset(skb->data, skb->len, frame_off);
+		if (offset < 0)
+			goto drop;
+		frame_off = offset;
+	}
 	if (wl_sae.armed && wl_sae.dev && skb && skb->len > 60 && skb->len < 4096) {
 		const unsigned char *me = wl_sae.dev->dev_addr;
 		unsigned int q, lim = skb->len - 30;
-		if (lim > 112)
-			lim = 112;
 		/* locate an 802.11 Authentication frame addressed to us: FC=0xb0, addr1=our MAC */
-		for (q = 0; q < lim; q++) {
+		for (q = frame_off; q < lim && q == frame_off; q++) {
 			if (skb->data[q] == 0xb0 && memcmp(skb->data + q + 4, me, 6) == 0) {
 				const unsigned char *f = skb->data + q;
 				unsigned int flen = skb->len - q;
@@ -3264,7 +3343,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 						                           wl_sae.freq ? wl_sae.freq : 2447, 0, f, flen, 0);
 						re_log("re: forwarded SAE frame -> userspace, delivered=%d\n", ok);
 					}
-					wl_re_pktfree(wl_sae.dev, pkt);   /* free RX skb ourselves */
+					wl_re_pktfree(wl_sae.dev, pkt, false);   /* free RX skb ourselves */
 					return;                           /* consumed: skip blob wlc_recv */
 				}
 				break;
@@ -3275,14 +3354,43 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 	 * (deauth/disassoc) must be ignored -- this blocks the classic spoofed-deauth attack
 	 * that the SAE-ignorant blob would otherwise honor. Anchor on FC subtype + SA/BSSID == AP
 	 * and DA == us|mcast to avoid false positives, then drop if the Protected-Frame bit is clear. */
-	if (wl_sae.pmf_active && wl_sae.dev && skb && skb->len > 28 && skb->len < 4096) {
+	if (wl_sae.pmf_active && wl_sae.dev && skb && skb->len > 28) {
 		const unsigned char *me = wl_sae.dev->dev_addr;
 		const unsigned char *ap = wl_sae.bssid;
 		unsigned int q, lim = skb->len - 24;
-		if (lim > 112)
-			lim = 112;
-		for (q = 0; q < lim; q++) {
+		for (q = frame_off; q < lim && q == frame_off; q++) {
 			unsigned char fc0 = skb->data[q], fc1 = skb->data[q + 1];
+			const u8 *f = skb->data + q;
+			size_t flen = skb->len - q - 4;
+			bool robust;
+			if (flen < 25)
+				goto drop;
+			robust = _ieee80211_is_robust_mgmt_frame((struct ieee80211_hdr *)f);
+			if (robust && (f[4] & 1)) {
+				unsigned long flags;
+				bool valid;
+				if (memcmp(f + 10, ap, 6) || memcmp(f + 16, ap, 6))
+					goto drop;
+				spin_lock_irqsave(&wl_bip_lock, flags);
+				valid = wl_pmf_verify(wl_bip_keys, f, flen);
+				spin_unlock_irqrestore(&wl_bip_lock, flags);
+				if (!valid)
+					goto drop;
+				if (fc0 == 0xc0 || fc0 == 0xa0) {
+					if (!wl_sae.dd_busy) {
+						memcpy(wl_sae.dd_frame, f, 26);
+						wl_sae.dd_len = 26;
+						wl_sae.dd_kind = 3;
+						wl_sae.dd_busy = true;
+						schedule_work(&wl_sae.dd_work);
+					}
+					goto drop;
+				}
+				goto pass;
+			}
+			if (robust && fc0 == 0xd0 && !(fc1 & 0x40) &&
+			    !memcmp(f + 4, me, 6))
+				goto drop;
 			if ((fc0 == 0xc0 || fc0 == 0xa0) &&                       /* deauth / disassoc */
 			    memcmp(skb->data + q + 10, ap, 6) == 0 &&             /* SA  = AP */
 			    memcmp(skb->data + q + 16, ap, 6) == 0 &&             /* BSSID = AP */
@@ -3303,7 +3411,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 						wl_sae.dd_busy = true;
 						schedule_work(&wl_sae.dd_work);
 					}
-					wl_re_pktfree(wl_sae.dev, pkt);
+					wl_re_pktfree(wl_sae.dev, pkt, false);
 					return;
 				}
 				{
@@ -3337,7 +3445,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 				if (ba > 0)
 					goto pass;
 				if (ba < 0) {
-					wl_re_pktfree(wl_sae.dev, pkt);
+						wl_re_pktfree(wl_sae.dev, pkt, false);
 					return;
 				}
 			}
@@ -3352,7 +3460,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 					wl_sae.saq_busy = true;
 					schedule_work(&wl_sae.saq_work);
 					re_log("re saq: queued protected action (len=%u) for SW decrypt\n", fl);
-					wl_re_pktfree(wl_sae.dev, pkt);
+						wl_re_pktfree(wl_sae.dev, pkt, false);
 					return;
 				}
 			}
@@ -3360,6 +3468,9 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 	}
 pass:
 	wlc_recv(wlc, pkt);
+	return;
+drop:
+	wl_re_pktfree(wl_sae.dev, pkt, false);
 }
 /* =================== end M3 bridge =================== */
 
@@ -4464,6 +4575,7 @@ void wl_cfg80211_detach(struct net_device *ndev)
 		cancel_work_sync(&wl_sae.dd_work);
 	}
 	wl_re_crypto_exit();
+	wl_bip_reset();
 	wl_deinit_cfg80211_priv(wl);
 	wl_free_wdev(wl);
 }
