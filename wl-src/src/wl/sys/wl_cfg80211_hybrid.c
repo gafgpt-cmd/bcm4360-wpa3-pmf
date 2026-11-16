@@ -3315,7 +3315,7 @@ done:
 /* Tap the per-frame RX entry (before the firmware's auth-state matching drops frames for
  * transactions it doesn't own) and forward received SAE auth frames to wpa_supplicant.
  * At wlc_recv entry skb->data points at the d11 rx-header; the 802.11 frame follows at
- * rxoff = *(u32*)(wlc+0x6bc) (+2 if the pad flag rxhdr[0x10]&4 is set). */
+ * rxoff = *(u32*)(wlc+0x6bc) + 6 PHY bytes (+2 if rxhdr[0x10]&4 is set). */
 extern void wlc_recv(void *wlc, void *pkt);
 void __wrap_wlc_recv(void *wlc, void *pkt)
 {
@@ -3366,10 +3366,8 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 			}
 		}
 	}
-	/* SW 802.11w PMF: once MFP is active, an unprotected robust management frame
-	 * (deauth/disassoc) must be ignored -- this blocks the classic spoofed-deauth attack
-	 * that the SAE-ignorant blob would otherwise honor. Anchor on FC subtype + SA/BSSID == AP
-	 * and DA == us|mcast to avoid false positives, then drop if the Protected-Frame bit is clear. */
+	/* BIP group frames normally have no Protected bit. Authenticate and commit replay
+	 * state before dispatch so the SAE-ignorant blob cannot honor forged teardown. */
 	if (wl_sae.pmf_active && wl_sae.dev && skb && skb->len > 28) {
 		const unsigned char *me = wl_sae.dev->dev_addr;
 		const unsigned char *ap = wl_sae.bssid;

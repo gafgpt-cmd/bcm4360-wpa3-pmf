@@ -17,19 +17,21 @@ gitleaks dir --redact --no-banner .
 Tests execute the PMF header with OpenSSL as the host crypto backend.
 Kernel module uses Linux AES-CMAC. No custom AES implementation.
 Host tests do not prove kernel integration or radio behavior.
-Current module requires the kernel AES-CMAC library API.
-
-Build: existing build.sh, pristine blob from installed distribution package, matching kernel headers.
-Do not run upstream dkms/install.sh unchanged.
+Build requirements and commands: [README.md](README.md#build).
 
 ## Temporary trial bundle
 
-Keep beside each other:
+Keep the prepared bundle in a home-folder directory outside Git, with:
 
 - trial.sh, revert.sh, SHA256SUMS
 - READY_FOR_TRIAL: candidate checksum, created only after required review/gate approvals
 - candidate/wl.ko
 - backup/wl.ko, KERNEL, SRCVERSION, SHA256SUMS
+
+KERNEL and SRCVERSION are one-line values for the saved stock module.
+Hash manifests use `sha256sum` format: backup/SHA256SUMS lists paths relative to
+backup/; the bundle's SHA256SUMS lists scripts, candidate and backup files relative
+to the bundle. READY_FOR_TRIAL contains the approved hash for candidate/wl.ko.
 
 ```bash
 bash trial.sh --check
@@ -40,17 +42,12 @@ sudo bash revert.sh
 Trial verifies hashes, kernel, loaded stock identity and signature policy.
 Copies recovery files into a root-owned runtime directory.
 Arms a 120-second system timer before unloading stock.
-Timer always restores stock. Failed loading also restores stock.
-Recovery verifies stock identity and falls back to the saved module.
+The timer invokes stock restoration; failed loading invokes it immediately.
+On the saved kernel, recovery loads the saved module directly and verifies stock identity.
+If the kernel changed, recovery loads that kernel's installed stock driver instead.
 Installed module files and saved Wi-Fi profiles stay untouched.
 Reboot loads stock. A kernel hang can defeat the timer; reboot may be necessary.
-Busy unload prints reboot instructions; it never force-unloads a module.
+Recovery prints reboot instructions if the candidate is busy; it never force-unloads a module.
 Missing READY_FOR_TRIAL disables loading; read-only --check still works.
 
-## Required independent reviews
-
-- GPT Astra: incomplete; provider blocked the review after reporting a rekey race.
-- OpenCode Kimi K3.1: pending.
-- no-mistakes and forge checks: pending.
-
-Deployment requires the final source revision to pass all gates.
+Required gates and their current status: [TESTING.md](TESTING.md#required-gates).

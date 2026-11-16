@@ -1,11 +1,12 @@
 # WPA3-SAE + 802.11w on the Broadcom BCM4360 (closed `wl` blob)
 
 Apple/Broadcom never gave the **BCM4360** (`14e4:43a0`) WPA3. Its only Linux driver is the
-closed `broadcom-sta` (`wl`) blob; `brcmfmac` can't drive it. This adds **WPA3-SAE + full
-802.11w PMF** to that closed blob — entirely from host software, **no firmware source**.
+closed `broadcom-sta` (`wl`) blob; `brcmfmac` can't drive it. This fork extends the upstream
+WPA3-SAE bridge with **BIP-CMAC-128 integrity and management replay protection** in host software,
+with **no firmware source**. Local changes are listed in [FORK.md](FORK.md).
 
-Proven on-air vs a WPA3-only, MFP-required AP: SAE auth → assoc → 4-way → CCMP data, stable,
-and resistant to **deauth-flood** *and* **SA-Query teardown** attacks.
+All on-air measurements below describe upstream revisions, before these local PMF changes.
+Current evidence and required gates are recorded in [TESTING.md](TESTING.md).
 
 ## How it works
 
@@ -22,8 +23,9 @@ call sites**:
      `wlc_recv`/`wlc_sendauth`/`wlc_authresp_client` land in our `__wrap_*` hooks.
 
 That's enough to drive SAE frames over the air, inject `wpa_supplicant`'s RSN IE into the
-assoc-req, install userspace-derived keys, and add software PMF (drop unprotected deauth;
-SW-CCMP answer SA-Queries).
+assoc-req, install userspace-derived keys, and add software PMF: BIP-CMAC-128 verification
+for group robust management frames and a shared CCMP replay floor for protected unicast
+management frames, including SA-Query, Block Ack and teardown.
 
 ## Reverse engineering
 
@@ -84,49 +86,32 @@ auth→assoc advancer at `0x5b79d`), the RX dispatch (`wlc_recv`), and the PMK/k
 
 ## Build
 
-Needs kernel headers, `gcc`, `binutils`, `python3`. The blob is **not** in this repo (proprietary).
-Builds against Linux 6.12 through 7.3 (see *Tested* below).
+Needs matching kernel headers, `gcc`, `binutils`, `python3`. The blob is **not** in this repo
+(proprietary). The local patch requires the kernel AES-CMAC library API
+(`crypto/aes-cbc-macs.h`); the upstream build range below does not establish compatibility
+with this patch. PMF operation also requires synchronous `ccm(aes)`.
 
 ```sh
 # 1. Get the pristine blob from broadcom-sta 6.30.223.271:
 #    hybrid-v35_64-nodebug-pcoem-6_30_223_271.tar.gz  ->  lib/wlc_hybrid.o_amd64
+mkdir -p wl-src/lib
 cp /path/to/wlc_hybrid.o_amd64 wl-src/lib/wlc_hybrid.o_amd64.orig
 #    Debian/Ubuntu: it is the same file the broadcom-sta-dkms package ships
 #    (sha256 352a6e349f74c69b78e76f68c63752c99b8f6b22dc942af531b754211d7f4743):
-#      sudo apt install broadcom-sta-dkms   # then, instead of the cp above:
+#    If already installed, instead of the cp above:
 #      cp /usr/src/broadcom-sta-6.30.223.271/lib/wlc_hybrid.o_amd64 wl-src/lib/wlc_hybrid.o_amd64.orig
-#    (remove/blacklist that package's own `wl` afterwards, it conflicts with ours)
-mkdir -p wl-src/lib
 
 # 2. Build:
-./build.sh                 # -> wl-src/wl.ko   (or download it from Releases)
+./build.sh                 # -> wl-src/wl.ko
 ```
 
-## Install
+## Temporary trial
 
-### Quick test
-```sh
-sudo rmmod b43 brcmfmac bcma ssb wl 2>/dev/null   # free the card
-sudo insmod wl-src/wl.ko                          # a wifi interface appears (wlan0, wlp3s0, ...)
-```
-**NetworkManager drives WPA3-SAE through this driver** — just use the wifi GUI: pick your network,
-enter the password, done. NM saves it and auto-reconnects on every boot. CLI equivalent:
-```sh
-nmcli con add type wifi ifname YOUR_IFNAME con-name w ssid "YOUR_SSID"
-nmcli con modify w wifi-sec.key-mgmt sae wifi-sec.psk "YOUR_PASS" 802-11-wireless-security.pmf 3
-nmcli con up w        # NM does SAE + 4-way + DHCP
-```
-(Standalone alternative: `sudo ./examples/connect.sh [ifname] examples/wpa3-sae.conf.example`;
-the interface name defaults to the first wireless interface.)
-
-### Persistent (survives reboot + kernel updates)
-```sh
-sudo dkms/install.sh
-```
-Registers the driver with DKMS (auto-rebuilds on kernel upgrades), blacklists the conflicting
-in-tree drivers + the stock `wl`, and loads ours at boot before NetworkManager. Then connect from
-the wifi GUI. Details and the one DKMS gotcha: [`dkms/README.md`](dkms/README.md). For a one-off
-manual rebuild instead, run `./build.sh` → `wl-src/wl.ko`.
+Use the gated recovery bundle described in [LOCAL.md](LOCAL.md#temporary-trial-bundle).
+Keep installed modules, Wi-Fi profiles, passwords and router settings unchanged.
+All elevated live operations are for the user to run after required gates pass.
+The inherited [DKMS installer documentation](dkms/README.md) is reference material;
+persistent installation is outside this fork's trial workflow.
 
 ### Debug logging
 The driver is quiet by default. For a bug report, or to watch the WPA3/PMF state machine, enable
@@ -134,7 +119,6 @@ verbose logging (BSSIDs and the RSN IE are logged, so scrub them before posting)
 ```sh
 echo 1 | sudo tee /sys/module/wl/parameters/re_verbose          # this boot: state machine, EAPOL, firmware events
 echo 2 | sudo tee /sys/module/wl/parameters/re_verbose          # + the blob's TX/RX counters every 5 s
-echo 'options wl re_verbose=1' | sudo tee /etc/modprobe.d/wl-debug.conf   # permanent
 ```
 
 ### Throughput with PMF (WPA3) and Block Ack
@@ -159,35 +143,9 @@ because an idle 2.4 GHz link showed false alarms overnight (about one retry per 
 runaway itself is not understood (it was seen 4 times in about 60 scans with the Block-Ack handling above, and
 never in about 150 scans without it).
 
-### Replacing Ubuntu/Debian's stock `wl` (broadcom-sta-dkms) permanently
-Both packages provide a module named `wl`, so the stock one has to go. In the repo directory:
-```sh
-# 1. keep the pristine blob (the stock package's copy is the right one; same sha256 as above)
-mkdir -p wl-src/lib
-cp /usr/src/broadcom-sta-*/lib/wlc_hybrid.o_amd64 wl-src/lib/wlc_hybrid.o_amd64.orig
-# 2. remove the stock driver (otherwise it is rebuilt for every new kernel and fights over the name `wl`)
-sudo apt purge broadcom-sta-dkms        # (broadcom-sta-common is pulled out with it)
-# 3. install ours via DKMS: rebuilt automatically for every new kernel, loaded at boot before NetworkManager
-sudo dkms/install.sh
-# 4. check
-dkms status                             # wl-wpa3/<version>, installed
-modinfo wl | grep -E "filename|description"    # .../updates/dkms/wl.ko*, "...WPA3-SAE and 802.11w (PMF) support"
-systemctl status wl-wpa3.service
-```
-Then set your network profile to WPA3 (see below), reboot once and check `nmcli dev` shows the wifi
-device. With Secure Boot enabled the module must be signed (DKMS signs it with your enrolled MOK on
-Ubuntu); with it disabled nothing is needed.
-
-To go back: `sudo dkms remove wl-wpa3/<version> --all`, `sudo systemctl disable --now wl-wpa3`,
-remove `/etc/modprobe.d/wl-wpa3.conf` and `/etc/systemd/system/wl-wpa3.service`, and
-`sudo apt install broadcom-sta-dkms`.
-
 ## WPA2/WPA3 transition-mode APs
 
-Use a **WPA3 (SAE)** profile on the client; a `wpa-psk` profile connects with WPA2 by design:
-```sh
-nmcli con modify YOUR_CON wifi-sec.key-mgmt sae 802-11-wireless-security.pmf 3
-```
+An existing **WPA3 (SAE)** profile selects WPA3; a `wpa-psk` profile connects with WPA2 by design.
 On a FRITZ!Box 6690 in WPA2/WPA3 mixed mode this is stable: 45 min soaks with an AP group-key rekey every
 10 min, 16 back-to-back disconnect/reconnect cycles, suspend/resume.
 
@@ -216,15 +174,14 @@ If the AP uses the same SSID on 2.4 and 5 GHz, wpa_supplicant picks the stronger
 - Re-joining the BSS you just left is the AP's weak spot (FRITZ!Box: "try again later" / no answer in
   30-40% of back-to-back reconnects). The driver absorbs it; the cost is an occasional ~5 s reconnect instead
   of ~1-2 s. WPA2-PSK median 1.7 s, max 5.4 s; SAE 0.3-1.1 s in 16-cycle stress tests.
-- The blob knows nothing about 802.11w, so the driver handles the PMF parts of the Block-Ack setup in
-  software (see below). If the module cannot get a synchronous `ccm(aes)` implementation, that is
-  disabled and SAE/PMF sessions run without frame aggregation (slow). `re_pmf_ba=0` turns it off.
+- A synchronous `ccm(aes)` implementation is required for protected unicast management RX,
+  including SA-Query and teardown. Without it these frames are dropped, so SAE/PMF operation
+  is not usable. `re_pmf_ba=0` disables Block Ack handling only; it does not bypass verification.
 - PMF only works with WPA3-SAE here: the blob builds the RSN element of a WPA2-PSK join itself, without PMF.
   NetworkManager does not ask for PMF on WPA2-PSK profiles (its PMF setting is ignored there); a direct
   wpa_supplicant config with `ieee80211w=2` and WPA-PSK is refused instead of connecting without PMF.
-- Not tested: a WPA3-only AP on this version, other APs than the FRITZ!Box 6690, 6.12-7.2 beyond building.
 
-## Tested
+## Upstream test history
 
 | Kernel | How | Result |
 |---|---|---|
@@ -235,8 +192,8 @@ If the AP uses the same SSID on 2.4 and 5 GHz, wpa_supplicant picks the stronger
 ## Caveats
 
 - The blob (`wlc_hybrid.o_amd64`) is **Broadcom proprietary** — get it from broadcom-sta yourself.
-  The `wl.ko` in Releases embeds it (same situation as Debian's `broadcom-sta-dkms`).
+  Built `wl.ko` modules embed it. Never commit or publish blobs or built modules in this fork.
 - Offsets are specific to broadcom-sta **6.30.223.271 / BCM4360**.
-- A prebuilt `wl.ko` is tied to the exact kernel it was built for (`vermagic`); build from source
-  (or use DKMS) for any other kernel.
+- A built `wl.ko` is tied to the exact kernel it was built for (`vermagic`); rebuild for any
+  other kernel before preparing a trial bundle.
 - Research code. License: GPL-2.0 (this wrapper) + Broadcom's license (the blob).

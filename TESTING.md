@@ -1,5 +1,20 @@
 # Test record
 
+## Required gates
+
+- GPT Astra: INCOMPLETE. Provider blocked further review after identifying the TX rekey race;
+  the race was fixed, but the required independent review remains open.
+- OpenCode Kimi K3.1: pending independent review.
+- no-mistakes: pending completion of the current run.
+- Gitleaks: prior local scan and synthetic-credential detection control passed.
+- GitHub CI: pending; no self-hosted runner is available for the new repository.
+  A full local mirror of the configured test and lint commands may satisfy the CI gate;
+  it must pass on the final source revision and does not replace Astra or Kimi.
+- Live validation: pending; see the protocol and results below.
+
+No deployment while required pre-deployment gates remain open. Local checks are not
+independent-review approval or hardware evidence. No upstream PR before genuine live validation.
+
 ## Local evidence
 
 - PMF host tests: passed with ASan and UBSan.
@@ -50,20 +65,20 @@ Focused commands: `python3 tests/rx.py`, `python3 tests/recovery.py`, and
 `make -C /lib/modules/"$(uname -r)"/build M="$PWD/wl-src" src/wl/sys/wl_cfg80211_hybrid.o`.
 The RX harness compiles the actual RX entrypoint and workers, using OpenSSL CCM
 and kernel-boundary stubs. Its oracle is the 802.11 CCMP PN ordering contract:
-authenticated SA-Query PN 10 and either teardown subtype PN 10 must still be
-processed after inline Block Ack PN 11; replayed and unauthenticated frames must
-not be processed. It also exercises ordinary requests, responses, Block Ack
+SA-Query PN 10 takes effect at RX before Block Ack PN 11 arrives; authenticated
+teardown PN 10 remains effective when its worker runs after Block Ack PN 11.
+Replayed and unauthenticated frames must not be processed.
+It also exercises ordinary requests, responses, Block Ack
 and PMF-inactive pass-through. Recovery stubs model kmod removing dependencies
 and insmod requiring them; both candidate and saved-module insertion must work.
 These commands are local evidence only. The configured test command invokes
 both regression harnesses; the existing push/pull-request workflow invokes that
 same command without path filters or job conditions. No remote CI was run here.
-Astra remains INCOMPLETE; Kimi and genuine live validation remain pending.
-No deployment authorized by these local checks.
+Current approval status is tracked in [Required gates](#required-gates).
 
 Results: RX and recovery regressions passed; the Gitleaks synthetic credential
 control passed; the changed driver object compiled against 7.2.15-1-omarchy.
-The original HEAD fails the delayed-SA-Query regression and the recovery
+The pre-review revision `a1f2655` fails the delayed-SA-Query regression and the recovery
 dependency-removal regression. The kernel object build reports four existing
 missing-prototype warnings on Broadcom wrapper entrypoints. Full module linking
 was not attempted because the proprietary blob is absent from this worktree.
@@ -82,12 +97,12 @@ unmatched responses, both teardown subtypes and delivery forms, first teardown
 reason, reason-code limits, forged frames, key replacement and session shutdown.
 The existing test command and unconditional push/pull-request workflow invoke
 this harness through `tests/check.sh`; local results do not establish remote CI.
-Astra remains INCOMPLETE; Kimi and live validation remain pending. No live radio
-operations are part of this verification.
+No live radio operations are part of this verification.
 
 Results: the expanded RX harness passed with ASan/UBSan, and the changed kernel
-object compiled successfully. The prior HEAD reproduces all three contention
-failures independently: matching response, unicast teardown and group teardown.
+object compiled successfully. The pre-contention-fix revision `e94e952` reproduces
+all three contention failures independently: matching response, unicast teardown
+and group teardown.
 Scheduling hooks exercise deterministic interleavings; this is not live kernel
 concurrency or hardware evidence. No complete suite, remote CI or deployment ran
 in this review phase.
