@@ -67,3 +67,27 @@ The original HEAD fails the delayed-SA-Query regression and the recovery
 dependency-removal regression. The kernel object build reports four existing
 missing-prototype warnings on Broadcom wrapper entrypoints. Full module linking
 was not attempted because the proprietary blob is absent from this worktree.
+
+## Worker-contention regression verification
+
+Focused verification: `python3 tests/rx.py` and compilation of the changed
+`wl_cfg80211_hybrid.o` with the kernel-object command above. The executable
+harness runs the actual RX wrapper, authentication boundary, SA-Query handlers
+and association-loss function. OpenSSL authenticates unicast CCMP and group BIP;
+only kernel scheduling, radio transmission and cfg80211 boundaries are stubbed.
+The oracle is 802.11 SA-Query transaction matching and authenticated teardown:
+worker occupancy must not cause a matching response to time out or suppress an
+authenticated teardown. Cases cover queued/running request and probe workers,
+unmatched responses, both teardown subtypes and delivery forms, first teardown
+reason, reason-code limits, forged frames, key replacement and session shutdown.
+The existing test command and unconditional push/pull-request workflow invoke
+this harness through `tests/check.sh`; local results do not establish remote CI.
+Astra remains INCOMPLETE; Kimi and live validation remain pending. No live radio
+operations are part of this verification.
+
+Results: the expanded RX harness passed with ASan/UBSan, and the changed kernel
+object compiled successfully. The prior HEAD reproduces all three contention
+failures independently: matching response, unicast teardown and group teardown.
+Scheduling hooks exercise deterministic interleavings; this is not live kernel
+concurrency or hardware evidence. No complete suite, remote CI or deployment ran
+in this review phase.

@@ -6,16 +6,18 @@ import tempfile
 
 repo = Path(__file__).resolve().parent.parent
 source = (repo / "wl-src/src/wl/sys/wl_cfg80211_hybrid.c").read_text(encoding="utf-8")
-protocol = (repo / "wl-src/src/wl/sys/wl_pmf.h").read_text(encoding="utf-8")
 functions = [
-    (protocol, "static int wl_pmf_frame_offset("),
-    (protocol, "static bool wl_pmf_replay_accept("),
-    (source, "static bool wl_mgmt_replay_accept("),
+    (source, "static unsigned int wl_re_pmf_stop("),
+    (source, "static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why)\n{"),
+    (source, "static bool wl_re_pmf_rx("),
+    (source, "static int wl_re_mgmt_verify("),
     (source, "static void wl_re_ccmp_blocks("),
     (source, "static inline u64 wl_re_ccmp_pn("),
     (source, "static int wl_re_mgmt_rx("),
     (source, "static int wl_re_ba_rx("),
     (source, "static void wl_re_saq_work(struct work_struct *w)\n{"),
+    (source, "static void wl_re_saq_start(struct net_device *dev, const char *why)\n{"),
+    (source, "static void wl_re_saq_chk_work(struct work_struct *w)\n{"),
     (source, "static void wl_re_dd_work(struct work_struct *w)\n{"),
     (source, "void __wrap_wlc_recv("),
 ]
