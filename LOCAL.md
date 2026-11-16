@@ -42,6 +42,8 @@ sudo bash revert.sh
 Trial verifies hashes, kernel, loaded stock identity and signature policy.
 Copies recovery files into a root-owned runtime directory.
 Arms a 120-second system timer before unloading stock.
+Trial and recovery use `rmmod wl` to preserve cfg80211 and its netlink family.
+Both load module dependencies before `insmod`.
 The timer invokes stock restoration; failed loading invokes it immediately.
 On the saved kernel, recovery loads the saved module directly and verifies stock identity.
 If the kernel changed, recovery loads that kernel's installed stock driver instead.

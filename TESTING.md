@@ -16,6 +16,8 @@
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
 Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
 Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
+It was revoked after the failed first trial. Refresh bundle helpers and hashes,
+then re-enable the approved retry only after source gates pass.
 Agent-led trials also require a separately verified physical uplink.
 Publication scope: feature-branch source only; no main push, merge, upstream PR,
 proprietary blob or generated module publication.
@@ -32,13 +34,14 @@ proprietary blob or generated module publication.
 - RX prefix: metadata + 6-byte PHY header; optional 2-byte pad covered.
 - Recovery: isolated command stubs; no real module operations.
 - Recovery cases: dry run, timer failure, load failure, timer-before-unload,
-  automatic/manual saved-module restore, changed installed version, dependency
-  removal/reload, dependency/metadata failure, wrong saved identity, tamper, kernel mismatch.
+  automatic/manual saved-module restore, changed installed version, shared-stack
+  preservation, dependency loading/failure, metadata failure, wrong saved identity,
+  tamper, kernel mismatch and busy-unload refusal.
 - Exact-kernel module build: `bdf1fac` passed against 7.2.15-1-omarchy,
   using a source archive and unchanged distribution blob outside Git.
   Module SHA-256: `5a47ba7af2f4ad44196035a49105af7d4948ad98e79b034f3e77e9e28bfb9da8`.
   Rebuild after any driver or build-source change.
-- Hardware behavior: not tested yet.
+- Hardware trial: association failed; see [Live results](#live-results).
   Low-signal stalls and GrapheneOS Pixel 9 Pro hotspot failures are reported;
   hardware causes remain hypotheses. Neither has an established fix.
 
@@ -80,7 +83,8 @@ No WPA3/PMF, phone-hotspot or weak-signal result established by this trial.
 
 Kernel logs show cfg80211 initialized again during both module swaps.
 The helpers used recursive `modprobe -r`; it may remove unused dependencies.
-Switch to `rmmod wl`, preserving the shared wireless stack and control-family ID.
+Revised lifecycle: [Temporary trial bundle](LOCAL.md#temporary-trial-bundle).
+No before/after control-family IDs were captured; an ID mismatch was not measured.
 Reference: [kmod removal semantics](https://github.com/kmod-project/kmod/blob/master/man/modprobe.8.scd).
 The executable recovery regression rejects dependency teardown during either swap.
 It fails before this change. Revised helpers still require another live trial.
