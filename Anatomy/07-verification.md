@@ -122,7 +122,7 @@ Replay advancement is tested after MIC success, not before it.
 | Bad version bits | drop |
 | Bad offset | drop |
 | Frame shorter than 24 after FCS | drop |
-| FCS present in body | stripped once |
+| Trailing FCS | excluded once from parser/userspace lengths; retained in object RX buffer |
 | SAE auth before START | consumed, no userspace event |
 | SAE auth after START | forwarded, then freed |
 | SAE auth passed to the object | never |
@@ -131,7 +131,7 @@ Replay advancement is tested after MIC success, not before it.
 | Protected deauth valid | applied |
 | Protected deauth bad MIC | dropped |
 | Group robust frame bad BIP | dropped |
-| Block Ack after valid CCMP | Protected bit cleared, re-injected |
+| Block Ack after valid CCMP | Protected bit cleared; prefix + header + plaintext + original FCS re-injected |
 | Block Ack without valid CCMP | dropped |
 | Data frame | passed through |
 | Version 1/2/3 on every handled subtype | dropped without normalization |

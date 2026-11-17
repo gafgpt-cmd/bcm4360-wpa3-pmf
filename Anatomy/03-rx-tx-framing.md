@@ -21,7 +21,7 @@ frame_off += (rx[0x10] & 0x04) ? 2 : 0   /* optional pad */
 | PHY bytes | `6` | always skipped |
 | pad | `0` or `2` | present when `rx[0x10]` bit 2 is set |
 | 802.11 frame | variable | starts at `frame_off` |
-| FCS | `4` | trailing, stripped before parsing |
+| FCS | `4` | trailing; excluded from parser lengths, retained in object buffers |
 
 The offset field is a host `u32` inside the object, not a little-endian wire value. Read it with
 `memcpy`.
@@ -39,7 +39,7 @@ Apply in order. Any failure drops the packet.
 | 5 | Room | `skb->len - frame_off < 6 + pad + 4` |
 | 6 | Version | `skb->data[frame_off] & 0x03 != 0` |
 
-The minimum-24-byte frame check applies after the offset is located and FCS is removed, in the
+The minimum-24-byte frame check applies after the offset is located and FCS is excluded from the parser length, in the
 per-family handlers, not to every packet at the tap.
 
 Rules:
@@ -98,9 +98,10 @@ Authentication body at `+24`:
 ## FCS handling
 
 - The trailing 4 bytes are the FCS.
-- Strip exactly once, after locating the frame and before parsing body lengths.
+- Exclude exactly once from parser and userspace lengths after locating the frame.
 - Never include FCS in MIC or AAD input.
-- Never hand a frame with FCS to userspace or to the object.
+- Userspace receives no FCS; the compatibility object's RX buffer retains it.
+- Verified Block Ack RX moves the original FCS after the plaintext body; it does not recompute it.
 
 ## RX decision matrix
 
@@ -138,8 +139,9 @@ RX:
 1. Verify CCMP and replay.
 2. Clear the Protected bit in the frame-control byte so the object's parser accepts the now-plaintext
    action frame.
-3. Trim to the plaintext length.
-4. Re-inject the frame to the object for Block Ack handling.
+3. Move the original four FCS bytes after the plaintext body; remove the CCMP header and MIC.
+4. Trim to `frame_off + 24 + plaintext_body_len + 4`, retaining the D11/PHY prefix and FCS.
+5. Re-inject the buffer to the object for Block Ack handling.
 
 TX:
 
@@ -170,7 +172,8 @@ Steps:
 4. Read `txq` from `wlc + 0x6a8`.
 5. Derive `bss` from the AP `scb`: `*(scb + 0x18)`.
 6. Queue with `wlc_queue_80211_frag(wlc, pkt, txq, scb, bss, 0, NULL, 0)`.
-7. Treat the queue result as acceptance, not transmission. Never free after the call.
+7. The wrapper ignores the queue result and returns `0` when packet and body allocation succeeded.
+   This proves dispatch only, not queue acceptance, transmission or completion. Never free after the call.
 
 Do not build the MAC header by hand when the helper exists. Do not queue with a null `scb`.
 
@@ -196,7 +199,7 @@ TX:
 
 RX:
 
-1. Locate frame and remove FCS.
+1. Locate frame; exclude FCS from parser and crypto lengths, retaining it in the object buffer.
 2. If protected, read PN and CCMP header.
 3. Verify and decrypt.
 4. Epoch check, then replay advance.
@@ -230,7 +233,7 @@ Counters are diagnostic. They must not change behavior.
 
 1. `skb->data` is not the 802.11 frame at entry.
 2. The offset is a host field, then is validated.
-3. FCS is stripped exactly once.
+3. Parser/userspace lengths exclude FCS exactly once; object RX buffers retain it.
 4. MIC verification precedes side effects.
 5. Replay advances only after MIC success.
 6. Management protection is host software.

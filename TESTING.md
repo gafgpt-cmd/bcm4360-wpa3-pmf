@@ -9,6 +9,8 @@
 - no-mistakes: `2db36bd` passed source gates with a live-validation exception
   and exact configured command mirror. The provisional-mode change at `91bdd32`
   is under review in run `01M7KAH2BSMPS78HW57FMK8T11`; no final pass claimed.
+- Installation validation: run `01M7KD8GZ8J414MY9D780TC245` completed with its
+  Test hardware exception recorded as inconclusive. This is gate evidence, not a live-install pass.
 - Gitleaks: directory and 25-commit history scans passed; detection control passed.
 - CI evidence: [Remote source checks](#remote-source-checks).
 - Live validation: negotiated SAE/PMF/BIP, explicit reconnect, radio off/on and
@@ -17,7 +19,8 @@
   checks below.
 
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
-Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
+Offline checks do not establish hardware behavior. After this documentation gate,
+the owner authorizes publication and an upstream Omarchy PR with untested hardware rows retained.
 Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
 The corrected phase-guard candidate is already built and live tested below.
 No driver/build inputs changed for provisional mode; that candidate remains exact.
@@ -30,8 +33,8 @@ Neither authorizes a model-gate pass or an unverified hardware claim.
 Trials are user-run; keep the verified USB tether connected throughout.
 The source pipeline must not operate the radio, use root/sudo, restart services,
 load/unload modules, or change network profiles or passwords.
-Publication scope: feature-branch source only; no main push, merge, upstream PR,
-proprietary blob or generated module publication.
+Publication scope after this gate: source/documentation publication and an upstream Omarchy PR.
+No proprietary blob or generated module publication.
 
 ## Local evidence
 
@@ -87,7 +90,7 @@ Trial authorization and uplink requirement: [Required gates](#required-gates).
    Check valid group teardown, forged MIC rejection and replay rejection on-air.
 
 No on-air injection against unrelated networks.
-No upstream PR while any required live test remains unverified.
+The authorized upstream Omarchy PR retains every unverified hardware row; publication is not certification.
 
 ## Live results
 
@@ -138,6 +141,10 @@ Corrected-helper live results are recorded above; the recovery regression covers
 dependency preservation during both swaps.
 
 ## Persistent install regression
+
+Earlier installation validation: run `01M7KD8GZ8J414MY9D780TC245` completed with its
+Test hardware exception recorded as inconclusive. Preserve that verdict separately
+from the stub regressions below; it does not establish an actual live installation.
 
 `python3 tests/install.py` executes the real install.sh and revert.sh with isolated
 stubs for root, modules, systemd, NetworkManager, timer arming and depmod. It uses

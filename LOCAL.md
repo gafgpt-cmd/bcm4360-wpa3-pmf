@@ -2,7 +2,8 @@
 
 Base: upstream WPA3 bridge + kernel compatibility revision.
 Scope: BIP-CMAC-128, replay checks, RX framing, temporary recovery, reversible
-current-kernel install. No upstream PR until hardware tests pass.
+current-kernel install. After the documentation gate, publication and an upstream
+Omarchy PR are owner-authorized; untested hardware rows remain explicit in [TESTING.md](TESTING.md).
 
 ## Check
 
