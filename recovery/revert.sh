@@ -74,7 +74,7 @@ restore_installed_file() {
   install -m 644 "$state/module" "$tmp" || return 1
   mv -f "$tmp" "$install_path" || return 1
   cmp -s "$state/module" "$install_path" || return 1
-  depmod "$saved_kernel" || return 1
+  (umask 022; depmod "$saved_kernel") || return 1
   printf 'Installed module file restored.\n'
 }
 
