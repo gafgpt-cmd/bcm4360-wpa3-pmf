@@ -114,7 +114,8 @@ Use the gated recovery bundle described in [LOCAL.md](LOCAL.md#temporary-trial-b
 Keep installed modules, Wi-Fi profiles, passwords and router settings unchanged.
 All elevated live operations are for the user to run after required gates pass.
 The inherited [DKMS installer documentation](dkms/README.md) is reference material;
-persistent installation is outside this fork's trial workflow.
+a reversible install for the running exact kernel is in
+[LOCAL.md](LOCAL.md#persistent-current-kernel-install). No DKMS registration.
 
 ### Debug logging
 The driver is quiet by default. For a bug report, or to watch the WPA3/PMF state machine, enable

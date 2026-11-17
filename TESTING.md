@@ -19,9 +19,12 @@ Offline checks do not establish hardware behavior. No upstream PR before genuine
 Prepare READY_FOR_TRIAL only for an agreed temporary trial with verified recovery files.
 The corrected phase-guard candidate is already built and live tested below.
 No driver/build inputs changed for provisional mode; that candidate remains exact.
-Rebuild and refresh bundle hashes only after driver/build inputs change.
-Source-gate approval permits helper staging and a user-run longer temporary trial;
-it does not establish complete hardware approval or permit permanent installation.
+Rebuild the module only after driver/build inputs change; refresh bundle hashes
+after any bundled file changes.
+Source-gate approval permits helper staging and a user-run temporary trial.
+Owner separately authorized a reversible persistent current-kernel install on
+2026-11-17; the coordinator stages READY_FOR_INSTALL only after its gate.
+Neither authorizes a model-gate pass or an unverified hardware claim.
 Trials are user-run; keep the verified USB tether connected throughout.
 The source pipeline must not operate the radio, use root/sudo, restart services,
 load/unload modules, or change network profiles or passwords.
@@ -39,6 +42,13 @@ proprietary blob or generated module publication.
 - Frames: short, missing/altered MIC, oversized, wrong flags rejected.
 - RX prefix: metadata + 6-byte PHY header; optional 2-byte pad covered.
 - Recovery: isolated command stubs; no real module operations.
+- Install recovery: isolated module/systemd/nmcli/depmod stubs; no real privileged
+  actions. Cases: dry run, invalid arguments, approval coverage and mismatch,
+  checksum/kernel/format/path/identity refusal, timer-before-replacement, .ko and
+  .ko.zst handling, timer/depmod/unload/load/reconnect/acceptance rollback,
+  candidate-identity plus connected-profile acceptance, manual restore with stock
+  already loaded, kernel-mismatch restore, busy rollback, lock/active-recovery
+  refusal, and repeat install preserving the original backup.
 - Recovery cases: dry run, timer failure, load failure, timer-before-unload,
   automatic/manual saved-module restore, changed installed version, shared-stack
   preservation, dependency loading/failure, metadata failure, wrong saved identity,
@@ -112,7 +122,9 @@ reconnect scenarios. Private raw logs remain on the laptop; no network identifie
 VPN blocked interface-bound gateway ping; candidate data-plane success is unverified.
 No on-air forgery/replay, wrong/right password, sustained traffic, weak-signal
 or full transition-matrix pass. Actual 3600-second timer/runtime mode remains
-to be live tested. No permanent installation or on-air security guarantee.
+to be live tested. No permanent installation was performed during those trials;
+the separately authorized reversible install is documented in LOCAL.md.
+No on-air security guarantee.
 
 First-trial logs showed cfg80211 reinitialization during both swaps with the old
 recursive `modprobe -r` helpers. No control-family ID mismatch was measured.
@@ -120,6 +132,23 @@ Reference: [kmod removal semantics](https://github.com/kmod-project/kmod/blob/ma
 Current lifecycle: [Temporary trial bundle](LOCAL.md#temporary-trial-bundle).
 Corrected-helper live results are recorded above; the recovery regression covers
 dependency preservation during both swaps.
+
+## Persistent install regression
+
+`python3 tests/install.py` executes the real install.sh and revert.sh with isolated
+stubs for root, modules, systemd, NetworkManager, timer arming and depmod. It uses
+scratch absolute paths and checks file bytes, metadata and call ordering.
+No sudo, radio, service, profile or installed-file action ran.
+
+Covered: dry run, invalid arguments, approval coverage, approval/checksum/kernel/
+format/path/identity refusal, timer-before-replacement, .ko and .ko.zst output,
+timer/depmod/unload/load/reconnect/acceptance rollback, matching candidate plus
+selected-profile acceptance, manual restore after stock is already loaded,
+root runtime rollback, kernel-mismatch restore, busy rollback, lock/active-recovery
+refusal, and repeat installs preserving the original backup.
+
+Results: passed locally, including the existing trial/revert regression.
+No remote CI or live install ran for this change.
 
 ## Review regression verification
 

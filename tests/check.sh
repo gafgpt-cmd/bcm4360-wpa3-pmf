@@ -9,3 +9,4 @@ python3 tests/rx.py
 if [[ -f tests/recovery.py ]]; then
   python3 tests/recovery.py
 fi
+python3 tests/install.py

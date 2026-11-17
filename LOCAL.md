@@ -1,8 +1,8 @@
 # Local PMF patch
 
 Base: upstream WPA3 bridge + kernel compatibility revision.
-Scope: BIP-CMAC-128, replay checks, RX framing, temporary recovery.
-No persistent installation. No upstream PR until hardware tests pass.
+Scope: BIP-CMAC-128, replay checks, RX framing, temporary recovery, reversible
+current-kernel install. No upstream PR until hardware tests pass.
 
 ## Check
 
@@ -18,6 +18,48 @@ Tests execute the PMF header with OpenSSL as the host crypto backend.
 Kernel module uses Linux AES-CMAC. No custom AES implementation.
 Host tests do not prove kernel integration or radio behavior.
 Build requirements and commands: [README.md](README.md#build).
+
+## Persistent current-kernel install
+
+Installs the already-built candidate for the running exact kernel.
+No DKMS: a kernel or package update may replace it with stock; rebuild and reinstall.
+
+Bundle adds:
+
+- install.sh
+- READY_FOR_INSTALL: coordinator-staged hashes for install.sh and candidate/wl.ko
+
+```bash
+bash install.sh --check
+sudo bash install.sh
+sudo bash install.sh --connection <profile>
+sudo bash revert.sh
+```
+
+First install saves the encoded installed module plus target/kernel metadata and
+checksums under backup/installed/. Later installs keep that original backup.
+
+Root actions:
+
+- verify bundle, approval, kernel, vermagic, installed stock identity and signature policy
+- copy rollback files into a root-owned runtime directory
+- arm a 120-second rollback timer before replacing files or unloading
+- replace the installed file atomically, then depmod
+- rmmod wl only; preserve cfg80211; load dependencies; insmod the candidate
+- reactivate the selected saved Wi-Fi profile through NetworkManager
+- cancel the timer only after candidate identity and the selected profile connection match
+
+No secrets or profile settings are read or changed. If the interface or profile is
+ambiguous, the command refuses before changes; use --connection.
+
+Acceptance means the candidate is loaded and NetworkManager reports the selected
+profile connected. It is not an internet test. Confirm real Wi-Fi internet before
+unplugging a USB-tethered phone.
+
+`bash revert.sh` restores the saved installed file on disk and depmods, even if the
+original driver is already loaded, then restores the original module identity.
+On a changed kernel it restores the saved file but loads that kernel's installed
+driver, never the saved binary. Busy modules are never force-unloaded.
 
 ## Temporary trial bundle
 
