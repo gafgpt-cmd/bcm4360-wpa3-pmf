@@ -60,16 +60,20 @@ There is no reserved field. The total is 18 bytes: 10 bytes of header and IPN, t
 ```text
 AAD  = FC[0] || (FC[1] & ~0x38) || A1 || A2 || A3     (20 bytes)
 data = frame[24 .. len-8]                               (body and MMIE header + IPN)
-pad  = 8 zero bytes                                     (CMAC length extension)
-MIC  = AES-CMAC(IGTK, AAD || data || pad)[0..8]
+mic  = 8 zero bytes                                     (MMIE MIC field, zeroed)
+MIC  = AES-CMAC(IGTK, AAD || data || mic)[0..8]
 ```
 
 | Field | Bytes |
 | --- | --- |
 | AAD | 20 |
 | Body | `len - 24 - 8` |
-| Pad | 8 |
+| MMIE MIC field, zeroed | 8 |
 | MIC | 8 |
+
+The final eight zero bytes are the MMIE MIC field, which the BIP construction treats as zero for
+authentication. They are not CMAC padding and do not extend the length. AES-CMAC applies its own
+block padding internally.
 
 Frame acceptance before crypto:
 
@@ -88,7 +92,7 @@ Then:
 1. Read IPN.
 2. Require the key to be valid.
 3. Compare IPN against the floor; reject `0`, above 48 bits, or not greater than the floor.
-4. Compute the MIC over AAD, body and pad.
+4. Compute the MIC over AAD, body and the zeroed MMIE MIC field.
 5. Compare 8 bytes in constant time.
 6. Advance the IPN only after the MIC succeeds.
 
@@ -119,9 +123,21 @@ and more-data, and sets the Protected bit.
 
 ### CCMP header and PN
 
-- An 8-byte CCMP header precedes the encrypted body.
-- The header's second byte is `0x20 | (key_id << 6)`.
-- PN is 48 bits, assembled from header bytes `0,1,4,5,6,7`:
+An 8-byte CCMP header precedes the encrypted body.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| `0` | 1 | PN0 |
+| `1` | 1 | PN1 |
+| `2` | 1 | reserved, `0` |
+| `3` | 1 | ExtIV and key ID: `0x20 | (key_id << 6)` |
+| `4` | 1 | PN2 |
+| `5` | 1 | PN3 |
+| `6` | 1 | PN4 |
+| `7` | 1 | PN5 |
+
+Key ID `0` therefore writes `0x20` at byte `3`. Byte `2` is reserved and stays zero.
+PN is 48 bits, assembled from header bytes `0,1,4,5,6,7`:
 
 ```text
 PN = h[0] | h[1]<<8 | h[4]<<16 | h[5]<<24 | h[6]<<32 | h[7]<<40
@@ -148,8 +164,9 @@ TX:
 
 ## Constant time
 
-- Compare MICs with a constant-time primitive.
+- Compare MICs and tags with a constant-time primitive.
 - Never branch on key bytes, MIC bytes or secret lengths.
+- Equality checks on public values, such as the artifact hash, need not be constant time.
 - Never log key material, PN-derived secrets or plaintext bodies.
 - Zeroize key buffers on delete and detach.
 
@@ -193,10 +210,10 @@ Frame:
 Procedure:
 
 1. Send a request with a fresh TID.
-2. Wait `300 ms`.
-3. Retry up to `3` times.
+2. After `300 ms` without a matching response, send the next request.
+3. At most three requests are sent in total, including the first.
 4. Any matching response clears the transaction.
-5. No response after the limit: treat the link as lost and disconnect.
+5. If the third request also times out, treat the link as lost and disconnect.
 
 Rules:
 
@@ -251,7 +268,7 @@ disconnect.
 | PN/IPN 48-bit | protocol | fixed |
 | Reject PN `0` | local policy | conservative |
 | Initial TX PN `0x1000000` | local policy | keeps management PN above short data sessions |
-| SA Query `300 ms` x `3` | local policy | bounded and tunable |
+| SA Query: three sends, `300 ms` apart | local policy | bounded and tunable |
 | Drop unprotected teardown | protocol plus policy | 802.11w defense |
 | Only one SA Query in flight | local policy | simplification |
 

@@ -1,6 +1,6 @@
 # 08. Limits and prerequisites
 
-What is required, what is proven, and what each mode still lacks.
+Required inputs and the limits of each mode.
 
 ## Status
 
@@ -157,14 +157,3 @@ Mode B cannot start from this document alone.
 | Silent downgrade | security loss | fail-closed policy |
 | Uncalibrated radio | deaf or illegal TX | require board data |
 | Wrong microcode | dead or unstable MAC | version check |
-
-## Open items
-
-- No complete register map.
-- No proven microcode load sequence for a native port.
-- No native TX calibration.
-- No native 5 GHz or suspend implementation.
-- No hardware-crypto proof for management frames, because management crypto is host software.
-- No multi-board validation.
-- No regulatory certification.
-- No on-air security or sustained-throughput claim.

@@ -19,7 +19,8 @@ Gate:
 
 1. Read image bytes.
 2. Compute SHA-256.
-3. Compare in constant time.
+3. Compare the digest with the expected value. The digest is public, so this is an ordinary
+   equality check, not a secret-dependent comparison.
 4. Refuse to load on mismatch; report expected and actual.
 5. Never patch or link an image that failed the gate.
 
@@ -27,7 +28,7 @@ Gate:
 
 - SysV AMD64 calling convention.
 - Integer arguments in `RDI, RSI, RDX, RCX, R8, R9`, then stack.
-- Return in `RAX`; negative values are errors unless a function documents otherwise.
+- Return in `RAX`. The object has no uniform error convention; use the contract for each symbol.
 - Structure fields are reached by byte offset from opaque pointers.
 - Offsets are compatibility seams. Never model them as `#[repr(C)]`.
 
@@ -42,9 +43,9 @@ Gate:
 | `txq` | transmit queue object |
 | `pkt` | packet/skb wrapper owned by the object |
 
-Pointers are borrowed pointers into object state. Non-null plus a known offset proves only that the
-access will not fault at that instant. It does not prove allocation bounds, object liveness, or
-absence of a concurrent teardown.
+Pointers are borrowed values into object state. A non-null value proves only that the pointer is
+nonzero. It does not prove that the target is mapped, allocated, live, within bounds, or free of a
+concurrent teardown.
 
 ## Offset seams
 
@@ -68,39 +69,48 @@ device. Read it with `memcpy` into a host `u32`.
 ## Auth TX
 
 ```c
-long wlc_sendauth(void *bsscfg, void *da, void *bssid, void *scb,
-                  int alg, int seq, int status,
-                  void *key, void *ie, unsigned char flags);
+long wlc_sendauth(void *a1, void *a2, void *a3, void *a4, int alg,
+                  int seq, int status, void *a8, void *a9, unsigned char a10);
 ```
 
 | # | Register | Role |
 | --- | --- | --- |
-| 1 | `RDI` | `bsscfg` |
-| 2 | `RSI` | destination (AP) |
-| 3 | `RDX` | BSSID |
-| 4 | `RCX` | `scb` (AP) |
+| 1 | `RDI` | `bsscfg`; captured by the host wrapper |
+| 2 | `RSI` | destination address; captured as the BSSID fallback |
+| 3 | `RDX` | third MAC address argument |
+| 4 | `RCX` | AP `scb`; captured by the host wrapper |
 | 5 | `R8D` | auth algorithm |
 | 6 | `R9D` | auth sequence |
 | 7 | `[rsp+0x8]` | auth status |
-| 8 | `[rsp+0x10]` | key / challenge IV |
-| 9 | `[rsp+0x18]` | IE buffer |
-| 10 | `[rsp+0x20]` | flags (byte) |
+| 8 | `[rsp+0x10]` | key/IV context, used only for the shared-key challenge |
+| 9 | `[rsp+0x18]` | IE buffer; byte 1 is the element length |
+| 10 | `[rsp+0x20]` | queue flag byte |
+
+The roles above are observed in the artifact. The extern declaration is the authority for the
+types and positions; do not rename the arguments into a different signature.
 
 Body construction:
 
-- six bytes little-endian `alg`, `seq`, `status`,
-- optional IE appended after the body,
-- shared-key challenge uses a key IV and protected frame control `0x40b0`,
+- three little-endian 16-bit fields `alg`, `seq`, `status`, six bytes total,
+- at most one IE appended after the body, copied as element ID, length and payload,
+- shared-key challenge only when `alg == 1`, `seq == 3` and `status == 0`; it uses the key/IV
+  context and protected frame control `0x40b0`,
 - SAE commit and confirm bodies are supplied by userspace, not built here.
 
-The callee owns the frame after return. Do not free the passed buffers.
+Return and ownership:
+
+- A nonzero return is the constructed packet pointer after the queue call.
+- The function returns `0` on its early-completion path and when the queue call reports failure.
+- Do not infer failure from a negative value; this symbol has no negative-error convention.
+- The caller's buffers stay borrowed. The object constructs and owns the frame. Do not free the
+  passed buffers or the returned packet.
 
 ## Auth RX
 
 ```c
-void wlc_authresp_client(void *bsscfg, long ctx,
+void wlc_authresp_client(void *bsscfg, long p2,
                          unsigned short *body, unsigned int len,
-                         unsigned char flag);
+                         unsigned char p5);
 ```
 
 | # | Register | Role |
@@ -118,40 +128,40 @@ Guard `len >= 6` before reading status.
 
 ```c
 void re_auth_advance(void *bsscfg, int code,
-                     const unsigned char *mac, int unused1, int unused2);
+                     const unsigned char *mac, int p4, int p5);
 ```
 
 Location: `.text + 0x5b79d`, minted as a symbol during the build.
 
 On `code == 0` it marks the station authenticated, advances association state and sends the
-association request. The AP `scb` must already exist. Call only under the driver lock, after the
-association IEs are installed.
+association request. The AP `scb` must already exist. Call it from the association-advance path,
+which holds `WL_LOCK`, after the association IEs are installed.
 
 ## Management TX
 
 ```c
-void *wlc_frame_get_mgmt_ex(void *wlc, unsigned short fc,
-                            const void *a1, const void *a2, const void *a3,
-                            int body_len, void **body, unsigned int hdr_pad,
-                            int tail);
+void *wlc_frame_get_mgmt_ex(void *wlc, uint16 fc, const void *da,
+                            const void *sa, const void *bssid,
+                            int body_len, void **body_out,
+                            uint hdr_pad, int tail);
 
 int wlc_queue_80211_frag(void *wlc, void *pkt, void *txq,
                          void *scb, void *bss, char flag,
-                         void *key, unsigned int zero);
+                         void *key, uint32 zero);
 ```
 
-`a1`, `a2`, `a3` are the three MAC header addresses in frame order. `body` receives a writable
-buffer of `body_len` bytes. Fill it, then queue with the real `scb` and `bss = *(scb + 0x18)`.
+`da`, `sa`, `bssid` are the three MAC header addresses in frame order. `body_out` receives a
+writable buffer of `body_len` bytes. Fill it, then queue with the real `scb` and
+`bss = *(scb + 0x18)`.
 
 Return handling:
 
-- `wlc_queue_80211_frag` returns an `int` boolean result.
-- The host wrapper ignores that result and returns success when a packet and body were produced.
-- A successful call proves only that the frame was handed to the queue. It does not prove
-  transmission or TX completion.
-- Because the result is ignored, the host cannot tell whether the object accepted or rejected the
-  packet. Do not free after the call. Treat the call as the ownership transfer point; if the object
-  can reject without consuming, the wrapper must be fixed before relying on it.
+- The host wrapper returns `0` when a packet and body buffer were produced.
+- It calls `wlc_queue_80211_frag` and ignores that call's boolean result.
+- It does not free on a failed queue call. The packet is still handed to the object once.
+- A `0` return proves allocation and the dispatch call only. It does not prove that the object
+  accepted the frame, transmitted it, or completed TX.
+- Do not free the packet after the call.
 
 Queuing with a null `scb` makes the object substitute a default station in the packet tag; the TX
 completion path then dereferences it. Always pass the AP `scb`.
@@ -159,7 +169,7 @@ completion path then dereferences it. Always pass the AP `scb`.
 ## Lookup helpers
 
 ```c
-void *wlc_bsscfg_find_by_bssid(void *wlc, const unsigned char *mac);
+void *wlc_bsscfg_find_by_bssid(void *wlc, const void *bssid);
 void *wlc_scbfind(void *wlc, void *bsscfg, const unsigned char *mac);
 ```
 
@@ -171,22 +181,24 @@ Both return borrowed pointers. Do not free. Revalidate after any disconnect, res
 | --- | --- |
 | RX consumed by host | host frees once |
 | RX passed to `wlc_recv` | object |
-| TX queued via `wlc_queue_80211_frag` | object |
+| Constructed TX packet passed to `wlc_queue_80211_frag` | object |
 | TX never queued | host frees with the drop flag |
-| `wlc_recv`, `wlc_queue_80211_frag` | take ownership; never free again |
+| Caller buffers passed to any seam | stay borrowed |
 
 Rules:
 
 - Exactly one free per packet.
-- Never free after a successful queue.
+- Never free the constructed packet after the queue call, even if the wrapper reports failure.
 - Never hand the same packet to two consumers.
 - Free outside any lock that the free path can re-enter.
 
 ## Locking and lifetime
 
-- Object entry points assume the driver lock is held unless documented otherwise.
-- `re_auth_advance`, TX queueing, RX handoff and key changes are serialized by the driver lock.
-- Do not hold the driver lock across `kmalloc(GFP_KERNEL)`, `copy_from_user` or any wait.
+- The host management TX path takes `WL_LOCK` around `wlc_frame_get_mgmt_ex` and
+  `wlc_queue_80211_frag`. The association-advance path takes `WL_LOCK` around
+  `re_auth_advance`.
+- `WL_LOCK` is `down/up` in all-passive mode and `spin_lock_bh` otherwise. Do not add a second
+  host lock around these seams.
 - Captured pointers are valid only for the current association and only while the object is attached.
 - Clear every captured pointer on disconnect, reset and detach. A detach race is a use-after-free,
   not a recoverable error.
@@ -211,22 +223,23 @@ These edits are seams, not source.
 
 | Condition | Result |
 | --- | --- |
-| Null `wlc`, `bsscfg` or `scb` | reject with `-EINVAL`, no call |
+| Null `wlc` or `wl->wlc` | reject with `-EINVAL`, no object call |
+| Null `bsscfg` at advance | return without calling the object |
 | Hash mismatch | refuse load |
 | Frame shorter than 24 bytes | reject with `-EINVAL` |
 | Allocation failure | `-ENOMEM` |
-| Missing AP `scb` at advance | abort, report link failure |
-| Association IE buffer not host-owned | refuse injection |
+| Missing AP `scb` at advance | return, report link failure |
+| Association IE buffer | must stay valid until `wl_re_release_assoc_ie`; the object frees it at teardown |
 
 ## Unsafe boundary
 
 ```text
 host state machine
   -> checked seam accessors (offset + width + null check)
-  -> extern "C" object calls under the driver lock
+  -> extern "C" object calls through the locked host seams
   -> opaque object-owned memory
 ```
 
 The host owns its state, keys, epochs and policy. It never owns object memory. A non-null pointer and
-a known offset do not establish that the target is allocated, live or race-free; that provenance
-must come from the object's own lifecycle contract.
+a known offset do not establish that the target is mapped, allocated, live or race-free; that
+provenance must come from the object's own lifecycle contract.

@@ -190,10 +190,12 @@ and AP security mode. Never record passwords, keys or full profiles.
 
 | Scenario | Expected | Current evidence |
 | --- | --- | --- |
-| SAE-only or transition AP | negotiated SAE, `pmf=2`, BIP group cipher | observed |
+| SAE-only or transition AP | negotiated SAE, `pmf=2`, BIP group cipher (policy and cipher only) | observed |
 | Explicit disconnect and reconnect, other band | fresh SAE and DHCP | observed |
 | Radio off/on | fresh SAE and DHCP | observed |
-| Gateway reachability over Wi-Fi | DHCP address and Wi-Fi gateway | observed |
+| Normal internet over Wi-Fi | DHCP and HTTPS 200 after the USB tether is removed | observed |
+| Stock restore | HTTPS 200 after restore | observed |
+| Protected Block Ack on a live link | protected ADDBA/DELBA accepted | not tested on air |
 | Wrong password | clean failure, no fallback | not tested |
 | Protected deauth from AP | verified and applied | not tested on air |
 | Replayed management frame | rejected | not tested on air |
@@ -229,10 +231,5 @@ A change is verified when:
 7. No secret appears in output.
 8. The hardware rows claimed as observed were actually run; every other row stays open.
 
-## What verification does not prove
-
-- That the device is fully understood.
-- That Mode A works with another artifact.
-- That the result is regulatory compliant.
-- That suspend, power save or hardware crypto work in a native port.
-- That on-air security was measured without an independent capture.
+Host tests do not establish kernel, firmware, radio or on-air behavior. The hardware matrix is the
+only place a hardware claim is recorded.

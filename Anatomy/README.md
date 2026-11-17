@@ -17,6 +17,7 @@ Audience: an implementer who needs exact seams, ownership, state machines and te
 | 6 | [06-rust-implementation.md](06-rust-implementation.md) | mac80211 reuse, module shape, locks, epochs, acceptance |
 | 7 | [07-verification.md](07-verification.md) | Host tests, hardware matrix, vectors, ownership and concurrency cases |
 | 8 | [08-limits-prerequisites.md](08-limits-prerequisites.md) | Required inputs, compat versus native limits, kernel and board constraints |
+| 9 | [09-core-lifecycle.md](09-core-lifecycle.md) | Attach, reset order, AC-PHY dependencies and board parameters |
 
 ## Two implementation modes
 
@@ -33,12 +34,15 @@ parity later or never.
 
 ## Invariants
 
-- SAE mathematics runs in userspace. The kernel never sees a password, PWE, scalar or SAE state.
+- SAE mathematics runs in userspace. Password, PWE and the private scalar stay there. The kernel
+  relays public SAE commit scalar and element bytes and owns the transport state. It also holds the
+  PTK and IGTK it installs.
 - PMF for management frames is host software. Device crypto is used for data only, if at all.
 - No downgrade: a PMF-required non-SAE join is refused; an SAE join that associates without SAE is refused.
 - MIC verification precedes every side effect; replay advances only after MIC success.
-- MIC comparison is constant time.
-- Every consumed RX packet is freed exactly once; every queued TX packet transfers ownership exactly once.
+- MIC and tag comparison is constant time.
+- Every consumed RX packet is freed exactly once. Caller buffers stay borrowed; the constructed TX
+  packet is handed to the object once.
 - ABI offsets are compatibility seams, not structure layouts or proof of allocation bounds.
 - Board calibration and microcode are inputs, not constants.
 
@@ -60,7 +64,7 @@ parity later or never.
 - BCM4360 core revision 40/42 MAC setup: https://lkml.iu.edu/hypermail/linux/kernel/2611.1/16345.html
 - BCM4360 AC microcode TX/RX formats: https://www.mail-archive.com/b43-dev%40lists.infradead.org/msg05065.html
 - BCM4360 AC-PHY support: https://lists.openwall.net/linux-kernel/2026/11/12/3436
-- IEEE 802.11-2020: clauses 12 (CCMP), 13 (BIP), 11.13 (SA Query)
+- IEEE 802.11-2020 (CCMP, BIP, SA Query)
 - RFC 4493: AES-CMAC
 - RFC 3610: CCM
 

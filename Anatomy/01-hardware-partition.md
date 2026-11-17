@@ -42,7 +42,7 @@ the host replaces that object entirely. The same jobs are never owned by both mo
 
 | Function | Owner | Contract |
 | --- | --- | --- |
-| SAE commit/confirm math | userspace | kernel never sees password, PWE, scalar or SAE state |
+| SAE commit/confirm math | userspace | password, PWE and private scalar stay in userspace; public commit scalar and element bytes pass through the kernel |
 | RSN parsing, 4-way, key derivation | userspace | kernel receives keys and policy only |
 | PMF MIC, replay, SA Query, protected teardown | host | implemented in host software; file 05 |
 | Management frame body construction | host | auth, assoc and action bodies built on host |

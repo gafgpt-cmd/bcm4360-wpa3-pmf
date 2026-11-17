@@ -143,8 +143,8 @@ No silent downgrade. No Open/PSK fallback for a WPA3-SAE request.
 | Rejoin quiet gap | `2000 ms` | after disconnect |
 | 4-way timeout | `3500 ms` | associated but no keys |
 | Deauth settle | `40 ms` | observe whether the protected deauth was ACKed |
-| SA Query retry | `300 ms` | per request |
-| SA Query limit | `3` | then treat the link as lost |
+| SA Query send interval | `300 ms` | between requests |
+| SA Query send limit | `3` | total requests, then treat the link as lost |
 
 Timers are per attempt. A new attempt cancels all timers from the previous attempt.
 

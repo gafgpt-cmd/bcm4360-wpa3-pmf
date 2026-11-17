@@ -8,7 +8,7 @@ A native port is a **mac80211 driver**, not a cfg80211 driver that rebuilds mana
 
 | Layer | Owner | Consequence |
 | --- | --- | --- |
-| SAE, RSN, 4-way, key derivation | `wpa_supplicant` | kernel never sees the password or SAE state |
+| SAE, RSN, 4-way, key derivation | `wpa_supplicant` | password, PWE and private scalar stay in userspace; public SAE bytes are relayed and the kernel holds the installed keys |
 | Management frame construction and parsing | mac80211 | do not duplicate auth/assoc/action builders |
 | External SAE transport | cfg80211 `external_auth` | forward auth frames; do not interpret status |
 | PMF (BIP, CCMP management, SA Query) | mac80211 where the kernel supports it | do not reimplement in Rust |
@@ -85,7 +85,7 @@ pure-Rust crypto fallback: if the kernel API is unavailable, the feature is unav
 | Epoch | adapter, atomic | monotonic |
 | RX skb | mac80211 after handoff | one path |
 | TX skb | device after queue | one path |
-| SAE state | userspace | never in kernel |
+| SAE secrets | userspace | password, PWE and private scalar |
 
 Rules:
 

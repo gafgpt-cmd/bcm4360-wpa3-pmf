@@ -12,7 +12,9 @@
 - Gitleaks: directory and 25-commit history scans passed; detection control passed.
 - CI evidence: [Remote source checks](#remote-source-checks).
 - Live validation: negotiated SAE/PMF/BIP, explicit reconnect, radio off/on and
-  automatic stock restoration passed on Nov 17. Remaining hardware checks below.
+  automatic stock restoration passed on Nov 17. Normal HTTPS over Wi-Fi returned 200
+  after the USB tether was removed, and again after stock restore. Remaining hardware
+  checks below.
 
 The owner waived only Astra/Kimi. Keep the remaining checks and live-test requirements.
 Offline checks do not establish hardware behavior. No upstream PR before genuine live validation.
@@ -94,14 +96,14 @@ Radio enabled/unblocked, but supplicant could not initialize the interface.
 The 120-second service restored the original module identity successfully.
 Wi-Fi remained unavailable after restore. Restarting the supplicant and cycling
 NetworkManager management of the Wi-Fi device restored stock association and DHCP.
-USB tethering kept the agent online; ordinary HTTPS returned200.
+USB tethering kept the agent online; ordinary HTTPS returned 200.
 No WPA3/PMF, phone-hotspot or weak-signal result established by this trial.
 
 Corrected helpers: secured normal-network authentication and DHCP succeeded.
 Automatic stock restore succeeded; no shared cfg80211 reload observed.
 Before the phase guard, two hotspot trials completed SAE, association,
 CCMP key negotiation and DHCP.
-Both failed after an explicit disconnect/reconnect; repeated status77 rejections.
+Both failed after an explicit disconnect/reconnect; repeated status 77 rejections.
 Debug trace: the placeholder response reached supplicant before external-auth START,
 triggering failure callbacks and aborting the join. A later START returned EINVAL.
 Stock restored automatically and reconnected; USB tether remained available.
@@ -117,9 +119,11 @@ Corrected phase-guard candidate, Nov 17, 2026 (local times), kernel `7.2.15-1-om
 - 00:03:33: automatic stock restoration passed; stock normal AP reactivated.
   USB tether remained online.
 
-Owner-supplied sanitized evidence establishes negotiated SAE+PMF and these two
-reconnect scenarios. Private raw logs remain on the laptop; no network identifiers published.
-VPN blocked interface-bound gateway ping; candidate data-plane success is unverified.
+Sanitized local evidence establishes negotiated SAE+PMF, these two reconnect scenarios,
+normal HTTPS 200 over Wi-Fi after the USB tether was removed, and HTTPS 200 after stock restore.
+No network identifiers are published.
+BIP negotiation is policy and cipher evidence; no forged, replayed or protected group traffic was
+received or rejected on air. No independent live Block Ack proof.
 No on-air forgery/replay, wrong/right password, sustained traffic, weak-signal
 or full transition-matrix pass. Actual 3600-second timer/runtime mode remains
 to be live tested. No permanent installation was performed during those trials;

@@ -13,9 +13,14 @@ answers SA Query. The vendor object still owns the MAC, rate control and aggrega
 | Proven | Not claimed |
 | --- | --- |
 | Host tests for PMF, replay, framing and recovery stubs | A native Rust driver |
-| One live session with SAE, `pmf=2` and BIP as the group cipher | On-air forgery or replay resistance measured independently |
+| One live session negotiated SAE, `pmf=2` and BIP as the group cipher | Received forged, replayed or protected group traffic, or a live protected Block Ack |
 | Explicit reconnect on the other band, radio off/on | Sustained throughput or a full stress matrix |
-| DHCP over Wi-Fi after association | Other boards, other object builds, suspend certification |
+| DHCP and HTTPS 200 over Wi-Fi after association | Other boards, other object builds, suspend certification |
+
+Live evidence on one board and AP: after the USB tether was removed, normal HTTPS over Wi-Fi
+returned 200 with the candidate loaded; after automatic stock restore, HTTPS also returned 200.
+Negotiated SAE, `pmf=2` and BIP prove the policy and cipher the supplicant selected. They do not
+prove that forged, replayed or protected group frames were received and rejected on air.
 
 Current evidence and the open hardware rows are in [TESTING.md](TESTING.md). Read that before
 treating any capability as validated on your machine.
@@ -73,10 +78,10 @@ Three build steps prepare the object:
 | --- | --- |
 | WPA3-SAE transport through cfg80211 external auth | working in the tested session |
 | Every post-START SAE status forwarded unchanged | working; covered by host tests |
-| BIP-CMAC-128 group cipher negotiation | observed in the live session |
-| BIP verification and replay | covered by host tests |
+| BIP-CMAC-128 group cipher negotiation | negotiated in the live session; cipher and policy only |
+| BIP verification and replay | covered by host tests; no on-air group traffic |
 | CCMP for unicast management, replay floors and SA Query | covered by host tests |
-| Protected Block Ack setup under PMF | implemented; not separately recorded in the live evidence |
+| Protected Block Ack setup under PMF | implemented; host tests only, no independent live Block Ack evidence |
 | Stalled-link probe using retry ratio | implemented; probe-only by default |
 | Bounded reconnect, rejoin quiet time, handshake watchdog | implemented |
 | Reversible trial and installation with rollback | implemented; regression-tested with stubs |
@@ -110,8 +115,11 @@ kernel before preparing a trial bundle. The current candidate targets `7.2.15-1-
 - Persistent current-kernel install with saved-module rollback:
   [LOCAL.md](LOCAL.md#persistent-current-kernel-install)
 
-Both paths keep the installed module, Wi-Fi profiles and router settings unchanged until the user
-runs the elevated step. A reboot restores the stock module in both modes.
+Both paths keep Wi-Fi profiles and router settings unchanged until the user runs the elevated step.
+The temporary trial leaves the installed module file untouched; a reboot restores the stock module.
+The persistent current-kernel install replaces the installed module file, so the replacement
+survives reboot. `revert.sh` restores the saved file and the running stock module. A kernel or
+package update may replace the candidate with stock; rebuild and reinstall for the exact kernel.
 
 ## Compatibility
 
