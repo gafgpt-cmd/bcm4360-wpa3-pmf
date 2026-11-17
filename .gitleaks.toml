@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public Broadcom C enum constants, not credentials"
+regexTarget = "secret"
+regexes = ['''^(CRYPTO_ALGO_WEP1|CRYPTO_ALGO_WEP128|DOT11_MAX_DEFAULT_KEYS)$''']

@@ -194,6 +194,6 @@ extern void *wl_re_dev_wlc(struct net_device *dev, void **osh_out);
 extern int wl_re_mgmt_tx(struct net_device *dev, const unsigned char *f, int flen, void *scb);
 extern void wl_re_drive_assoc(struct net_device *dev, void *bsscfg, const unsigned char *mac,
                               const unsigned char *assoc_ie, unsigned int assoc_ie_len);
-extern void wl_re_pktfree(struct net_device *dev, void *pkt);
+extern void wl_re_pktfree(struct net_device *dev, void *pkt, bool send);
 
 #endif

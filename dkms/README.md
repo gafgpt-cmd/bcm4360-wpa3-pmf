@@ -1,5 +1,8 @@
 # DKMS install (auto-rebuild on kernel updates)
 
+Inherited installer reference only. This fork's permitted trial workflow is documented
+in [LOCAL.md](../LOCAL.md#temporary-trial-bundle); persistent installation is outside its scope.
+
 The module is built per-kernel, so a kernel upgrade needs a rebuild. DKMS automates that.
 
 ```sh
