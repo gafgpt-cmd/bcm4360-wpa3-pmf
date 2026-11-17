@@ -28,7 +28,7 @@ while (( $# )); do
 done
 
 for tool in sha256sum modinfo modprobe rmmod insmod depmod systemd-run systemctl \
-  systemd-path flock install findmnt nmcli timeout mktemp mv dirname basename readlink cmp; do
+  systemd-path flock install findmnt nmcli timeout sleep mktemp mv dirname basename readlink cmp; do
   command -v "$tool" >/dev/null || { printf 'Missing: %s\n' "$tool" >&2; exit 1; }
 done
 
@@ -317,7 +317,7 @@ case $format in
 esac
 mv -f "$tmp_file" "$installed"
 tmp_file=
-depmod "$saved_kernel" || abort 'depmod failed after replacing the installed module.'
+(umask 022; depmod "$saved_kernel") || abort 'depmod failed after replacing the installed module.'
 
 rmmod wl || abort 'wl is busy and cannot unload safely.'
 depends=$(modinfo -F depends "$stage/candidate/wl.ko") || abort 'Cannot read candidate dependencies.'
@@ -330,6 +330,20 @@ insmod "$stage/candidate/wl.ko" || abort 'Candidate module failed to load.'
 
 loaded=$(cat "$sysroot/module/wl/srcversion" 2>/dev/null || true)
 [[ $loaded == "$candidate_srcversion" ]] || abort 'Loaded module identity does not match the candidate.'
+
+device_ready=false
+for ((ready_attempt = 0; ready_attempt < 20; ready_attempt++)); do
+  device_state=$(timeout 1 nmcli -g GENERAL.STATE device show "$iface" 2>/dev/null || true)
+  device_state=${device_state%% *}
+  case $device_state in
+    30|40|50|60|70|80|90|100|120)
+      device_ready=true
+      break
+      ;;
+  esac
+  sleep 0.25
+done
+[[ $device_ready == true ]] || abort 'NetworkManager did not make the Wi-Fi device available.'
 
 if ! timeout 45 nmcli connection up "$profile_uuid" ifname "$iface"; then
   abort 'Saved Wi-Fi profile failed to reconnect.'

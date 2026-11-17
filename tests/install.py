@@ -100,6 +100,10 @@ elif name == "depmod":
     mode = os.environ.get("FAIL_DEPMOD")
     if mode == "always" or (mode == "first" and count == 1):
         sys.exit(1)
+    temporary = state / "module-index.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    os.close(descriptor)
+    os.replace(temporary, state / "modules.dep")
 elif name == "modprobe":
     if args == ["wl"]:
         loaded_write(os.environ.get("MODPROBE_VERSION", "stock-src"))
@@ -127,7 +131,19 @@ elif name == "insmod":
     else:
         loaded_write("wrong-version" if os.environ.get("WRONG_BACKUP") else "stock-src")
 elif name == "nmcli":
-    if args[:2] == ["-g", "UUID,DEVICE"] and args[2:] == ["connection", "show", "--active"]:
+    if args[:2] == ["-g", "GENERAL.STATE"] and args[2:4] == ["device", "show"]:
+        states = json.loads(os.environ.get("DEVICE_READY_STATES", '["30"]'))
+        counter = state / "device_queries"
+        count = int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+        counter.write_text(str(count + 1), encoding="utf-8")
+        value = states[min(count, len(states) - 1)]
+        if value == "missing":
+            print("Error: device not found", file=sys.stderr)
+            sys.exit(10)
+        if value in ("30", "40", "50", "60", "70", "80", "90", "100", "120"):
+            (state / "device_ready").write_text("1", encoding="utf-8")
+        print(value + " (device state)")
+    elif args[:2] == ["-g", "UUID,DEVICE"] and args[2:] == ["connection", "show", "--active"]:
         active = state / "active"
         if active.exists():
             print(active.read_text(encoding="utf-8").strip())
@@ -136,6 +152,9 @@ elif name == "nmcli":
     elif args[:2] == ["-g", "connection.uuid"] and args[2:4] == ["connection", "show"]:
         print(one("profile_uuid", "uuid-selected"))
     elif args[:2] == ["connection", "up"]:
+        if os.environ.get("DEVICE_READY_STATES") and not (state / "device_ready").exists():
+            print("Error: device not found for connection", file=sys.stderr)
+            sys.exit(10)
         if os.environ.get("FAIL_RECONNECT"):
             sys.exit(1)
         if os.environ.get("NO_CONNECT"):
@@ -227,7 +246,8 @@ def case(name, fmt="ko", interfaces=("wlan0",), active="uuid-selected:wlan0",
         env["REAL_" + tool.upper()] = shutil.which(tool)
     for key in ("FAIL_TIMER", "FAIL_LOAD", "FAIL_UNLOAD", "FAIL_DEPENDENCY", "FAIL_DEPMOD",
                 "FAIL_RECONNECT", "FAIL_MODPROBE", "WRONG_BACKUP", "WRONG_IDENTITY",
-                "NO_CONNECT", "MODPROBE_VERSION", "INSTALLED_VERSION", "FAIL_RESTORE_OP"):
+                "NO_CONNECT", "MODPROBE_VERSION", "INSTALLED_VERSION", "FAIL_RESTORE_OP",
+                "DEVICE_READY_STATES"):
         env.pop(key, None)
     return state, bundle, env, installed, installed.read_bytes()
 
@@ -296,6 +316,26 @@ result = run(bundle, env, "--check")
 assert result.returncode != 0 and "integrity" in result.stderr
 untouched(state, bundle, installed, original)
 
+state, bundle, env, installed, original = case("delayed-device")
+env["DEVICE_READY_STATES"] = '["missing", "20", "30"]'
+result = run(bundle, env)
+assert result.returncode == 0, ("device rediscovery must precede activation", result.stderr)
+assert installed.read_bytes() == CANDIDATE
+assert int((state / "device_queries").read_text(encoding="utf-8")) == 3
+assert (state / "modules.dep").stat().st_mode & 0o777 == 0o644
+assert (bundle / "backup/installed/module").stat().st_mode & 0o777 == 0o600
+assert not (state / "timer").exists()
+
+state, bundle, env, installed, original = case("device-never-ready")
+env["DEVICE_READY_STATES"] = '["20"]'
+result = run(bundle, env)
+assert result.returncode != 0
+assert installed.read_bytes() == original
+assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-src"
+assert not any(c[:3] == ["nmcli", "connection", "up"] for c in calls(state))
+assert (state / "modules.dep").stat().st_mode & 0o777 == 0o644
+assert not (state / "timer").exists()
+
 state, bundle, env, installed, original = case("install-ko")
 result = run(bundle, env)
 assert result.returncode == 0, result.stderr
@@ -321,6 +361,7 @@ rollback = subprocess.run(timer_args[-2:], env=env, text=True, capture_output=Tr
 assert rollback.returncode == 0, rollback.stderr
 assert installed.read_bytes() == original
 assert (state / "sys/module/wl/srcversion").read_text(encoding="utf-8").strip() == "stock-src"
+assert (state / "modules.dep").stat().st_mode & 0o777 == 0o644
 
 state, bundle, env, installed, original = case("install-zst", fmt="zst")
 result = run(bundle, env)
