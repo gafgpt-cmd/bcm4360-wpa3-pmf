@@ -12,16 +12,20 @@ Compatibility seams for one artifact. Not a stable interface, not a structure la
 | Symbols | not stripped |
 | SHA-256 | `352a6e349f74c69b78e76f68c63752c99b8f6b22dc942af531b754211d7f4743` |
 
-The ABI applies only to this hash. A different build, even with the same version string, may have
-different offsets and must be rejected.
+The ABI applies only to this pristine hash. A different build, even with the same version string,
+may have different offsets and is unsupported.
 
-Gate:
+Current C bridge: manually verify the pristine object's whole-file SHA-256 before running
+`build.sh`. The build does not compute this digest or enforce rejection of other artifacts.
+Do not build or load a candidate whose pristine input identity has not been verified.
+
+Required automatic gate for a future compatibility implementation, not implemented in the current bridge:
 
 1. Read image bytes.
 2. Compute SHA-256.
 3. Compare the digest with the expected value. The digest is public, so this is an ordinary
    equality check, not a secret-dependent comparison.
-4. Refuse to load on mismatch; report expected and actual.
+4. Reject the pristine input on mismatch; report expected and actual.
 5. Never patch or link an image that failed the gate.
 
 ## ABI form
@@ -205,7 +209,7 @@ Rules:
 
 ## Patch semantics
 
-Two length-preserving edits make the bridge possible.
+Two edits make the bridge possible; the instruction patch preserves code length.
 
 | Edit | Location | Semantics |
 | --- | --- | --- |
@@ -214,8 +218,17 @@ Two length-preserving edits make the bridge possible.
 
 `.text` virtual address `V` maps to file offset `V + 0x40`.
 
-Both edits validate the original bytes before writing. A mismatch aborts; never write on a stale
-offset. The redirect is layout-safe: symbols are appended, section offsets updated, no code moved.
+`wl_patch.py` checks the expected instruction bytes, also accepting the already-patched bytes.
+On mismatch it exits without writing. This is a local byte check, not whole-object identification.
+`wl_reloc.py` checks ELF64 identification, reads section metadata and requires the redirect symbols
+on an unpatched input. It does not validate original instruction bytes or a whole-object digest.
+It appends symbol/string tables and updates section offsets without moving code.
+
+`build.sh` pipes both helpers through `sed` without `pipefail`; helper failure can be masked.
+Build success alone proves neither pristine identity nor successful patching.
+For the current bridge, manually verify pristine identity, helper results and the resulting edits
+before loading. Automatic hash rejection and propagation of helper failures are prerequisites
+for a future compatibility implementation.
 
 These edits are seams, not source.
 
@@ -225,7 +238,7 @@ These edits are seams, not source.
 | --- | --- |
 | Null `wlc` or `wl->wlc` | reject with `-EINVAL`, no object call |
 | Null `bsscfg` at advance | return without calling the object |
-| Hash mismatch | refuse load |
+| Pristine hash mismatch | unsupported; operator must stop before build/load; no automatic current-bridge gate |
 | Frame shorter than 24 bytes | reject with `-EINVAL` |
 | Allocation failure | `-ENOMEM` |
 | Missing AP `scb` at advance | return, report link failure |

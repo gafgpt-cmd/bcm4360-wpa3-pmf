@@ -60,7 +60,7 @@ the management path.
 
 Host supplies:
 
-- exact artifact identity (hash-gated; file 02),
+- exact artifact identity (manually verify the pristine hash; file 02),
 - PCI probe and mapping,
 - IRQ and deferred-work plumbing,
 - packet free callback,

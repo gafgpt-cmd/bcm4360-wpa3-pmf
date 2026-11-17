@@ -20,7 +20,7 @@ Required inputs and the limits of each mode.
 | Regulatory limits | A and B | host regdb plus board data | illegal or clamped operation |
 | Core revisions | B | device probe | register bases unknown |
 | DMA ring layout | B | board data or public b43 work | TX/RX cannot start |
-| Exact artifact hash | A | the one supported build | refuse to load |
+| Exact pristine artifact hash | A | the one supported build | operator must stop before build/load; manually verified |
 
 Microcode and calibration are inputs, not constants. Do not embed them in the repository.
 
@@ -35,7 +35,7 @@ Microcode and calibration are inputs, not constants. Do not embed them in the re
 | Hardware crypto for management | not used; management protection is host software |
 | Hardware crypto for data | object-managed; not a management dependency |
 | Other BCM4360 boards | untested |
-| Other artifact builds | rejected by the hash gate |
+| Other artifact builds | unsupported; no automatic whole-object hash gate; manual verification required |
 | Monitor mode, injection, AP, mesh, IBSS | out of scope |
 | 6 GHz, VHT80+, MU-MIMO, beamforming | unsupported |
 | Power save, ASPM, WoWLAN | unsupported or not enabled by default |
@@ -118,17 +118,19 @@ The current candidate is built for `7.2.15-1-omarchy`. A built module is bound t
 
 ## Mode A prerequisites
 
-1. Exact artifact hash matches.
+1. Manually verify the pristine whole-object hash before building; current scripts do not enforce it.
 2. The artifact links against the target kernel.
-3. Required symbols are globalized and the redirect set applies cleanly.
-4. The auth clamp passthrough is applied at the validated offset.
+3. Required symbols are globalized and the redirect set applies cleanly; manually verify the result.
+4. The auth clamp passthrough is applied at the byte-validated offset; manually verify helper success.
 5. PCI probe, BAR map and IRQ work.
 6. The packet free callback is wired.
 7. Management TX and RX taps are installed.
 8. Userspace SAE and RSN are available.
 9. Board data is present for the installed card.
 
-Missing any one: Mode A does not run.
+These are operating prerequisites, not all enforced checks. Build success alone does not prove them.
+The future compatibility implementation must reject a wrong pristine hash automatically and propagate
+patch-helper failures; the current C bridge does neither.
 
 ## Mode B prerequisites
 
@@ -147,7 +149,7 @@ Mode B cannot start from this document alone.
 
 | Risk | Effect | Mitigation |
 | --- | --- | --- |
-| Wrong offset | memory corruption | hash gate plus checked accessors |
+| Wrong offset | memory corruption | current bridge: manual pristine-hash and patch-result verification; future compat: enforced hash gate plus checked accessors |
 | Wrong ownership | double free or leak | one-owner rule plus fault injection |
 | Missing lock | race or crash | lock order plus lockdep |
 | Stale pointer after teardown | use after free | epoch plus clear on teardown |
