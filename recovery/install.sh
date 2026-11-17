@@ -28,7 +28,7 @@ while (( $# )); do
 done
 
 for tool in sha256sum modinfo modprobe rmmod insmod depmod systemd-run systemctl \
-  systemd-path flock install findmnt nmcli timeout mktemp mv dirname basename readlink; do
+  systemd-path flock install findmnt nmcli timeout mktemp mv dirname basename readlink cmp; do
   command -v "$tool" >/dev/null || { printf 'Missing: %s\n' "$tool" >&2; exit 1; }
 done
 
@@ -183,7 +183,7 @@ resolve_connection() {
     profile_type=$(nmcli -g connection.type connection show "$profile") \
       || die 'Cannot read the selected connection.'
     [[ $profile_type == 802-11-wireless ]] || die 'The selected connection is not a saved Wi-Fi profile.'
-    profile_uuid=$(nmcli -g UUID connection show "$profile") || die 'Cannot read the selected profile.'
+    profile_uuid=$(nmcli -g connection.uuid connection show "$profile") || die 'Cannot read the selected profile.'
     [[ -n $profile_uuid ]] || die 'The selected profile has no UUID.'
   else
     mapfile -t active_list < <(nmcli -g UUID,DEVICE connection show --active)
@@ -282,12 +282,13 @@ rollback() {
   if [[ -n $tmp_file && -e $tmp_file ]]; then
     rm -f -- "$tmp_file"
   fi
-  systemctl stop wl-wpa3-install-restore.timer wl-wpa3-install-restore.service \
-    2>/dev/null || true
   if bash "$stage/revert.sh"; then
+    systemctl stop wl-wpa3-install-restore.timer wl-wpa3-install-restore.service \
+      2>/dev/null || true
     printf 'Original installed module restored.\n'
   else
-    printf 'Automatic restore failed. Reboot uses the restored stock module file.\n' >&2
+    printf 'Automatic restore failed; disk restoration is not confirmed.\n' >&2
+    printf 'Retry manual restore: sudo bash %q\n' "$stage/revert.sh" >&2
     return 1
   fi
 }

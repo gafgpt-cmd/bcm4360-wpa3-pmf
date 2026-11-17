@@ -54,6 +54,11 @@ umask 077
 stage=$(mktemp -d "$runtime_root/wl-wpa3-trial.XXXXXX")
 install -d -m 700 "$stage/backup" "$stage/candidate"
 install -m 600 trial.sh revert.sh SHA256SUMS READY_FOR_TRIAL "$stage/"
+for file in install.sh READY_FOR_INSTALL; do
+  if [[ -f $file ]]; then
+    install -m 600 "$file" "$stage/"
+  fi
+done
 install -m 600 backup/wl.ko backup/KERNEL backup/SRCVERSION backup/SHA256SUMS "$stage/backup/"
 install -m 600 candidate/wl.ko "$stage/candidate/"
 cd "$stage"

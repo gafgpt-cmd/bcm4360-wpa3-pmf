@@ -30,10 +30,10 @@ restore_installed_file() {
     printf 'Installed-module backup failed its checksum.\n' >&2
     return 1
   }
-  read -r install_path < "$state/INSTALL_PATH"
-  read -r install_format < "$state/FORMAT"
-  read -r state_kernel < "$state/KERNEL"
-  read -r state_version < "$state/SRCVERSION"
+  read -r install_path < "$state/INSTALL_PATH" || return 1
+  read -r install_format < "$state/FORMAT" || return 1
+  read -r state_kernel < "$state/KERNEL" || return 1
+  read -r state_version < "$state/SRCVERSION" || return 1
   [[ $state_kernel == "$saved_kernel" && $state_version == "$saved_version" ]] || {
     printf 'Installed-module backup metadata is inconsistent.\n' >&2
     return 1
@@ -65,15 +65,16 @@ restore_installed_file() {
       return 1
     fi
   fi
-  target_dir=$(dirname "$install_path")
+  target_dir=$(dirname "$install_path") || return 1
   if [[ ! -d $target_dir ]]; then
     printf 'Saved kernel module directory is gone; disk restore skipped.\n' >&2
-    return 0
+    return 1
   fi
-  tmp=$(mktemp "$target_dir/.wl-wpa3-restore.XXXXXX")
-  install -m 644 "$state/module" "$tmp"
-  mv -f "$tmp" "$install_path"
-  depmod "$saved_kernel"
+  tmp=$(mktemp "$target_dir/.wl-wpa3-restore.XXXXXX") || return 1
+  install -m 644 "$state/module" "$tmp" || return 1
+  mv -f "$tmp" "$install_path" || return 1
+  cmp -s "$state/module" "$install_path" || return 1
+  depmod "$saved_kernel" || return 1
   printf 'Installed module file restored.\n'
 }
 

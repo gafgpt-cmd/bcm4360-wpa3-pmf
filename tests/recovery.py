@@ -78,7 +78,7 @@ def case(name):
     (state / "calls").write_text("", encoding="utf-8")
     (state / "dependencies").write_text('["cfg80211"]', encoding="utf-8")
     (state / "wireless_stack_resets").write_text("0", encoding="utf-8")
-    for script in ("trial.sh", "revert.sh"):
+    for script in ("trial.sh", "install.sh", "revert.sh"):
         shutil.copy2(repo / "recovery" / script, bundle / script)
     (bundle / "backup/wl.ko").write_bytes(b"stock module")
     (bundle / "candidate/wl.ko").write_bytes(b"candidate module")
@@ -88,7 +88,8 @@ def case(name):
     (bundle / "backup/SRCVERSION").write_text("stock-version\n", encoding="utf-8")
     (state / "sys/module/wl/srcversion").write_text("stock-version\n", encoding="utf-8")
     manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
-    manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
+    (bundle / "READY_FOR_INSTALL").write_text(candidate_hash + "  candidate/wl.ko\n", encoding="utf-8")
+    manifest(bundle, ["trial.sh", "install.sh", "READY_FOR_INSTALL", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
     env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ["PATH"], TEST_STATE=str(state), HOME=str(state / "home"))
     for key in ("FAIL_TIMER", "FAIL_LOAD", "FAIL_UNLOAD", "FAIL_DEPENDENCY", "FAIL_MODINFO", "INSTALLED_VERSION", "WRONG_BACKUP"):
         env.pop(key, None)
@@ -210,7 +211,7 @@ assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in c
 state, bundle, env = case("kernel-mismatch")
 (bundle / "backup/KERNEL").write_text("other-kernel\n", encoding="utf-8")
 manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
-manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
+manifest(bundle, ["trial.sh", "install.sh", "READY_FOR_INSTALL", "revert.sh", "backup/wl.ko", "backup/KERNEL", "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
 assert run(bundle, env).returncode != 0
 assert not any(c[0] in ("modprobe", "rmmod", "insmod", "systemd-run") for c in calls(state))
 print("Recovery: dry run, timer-before-unload, timer failure, load failure, automatic/manual restore, shared Wi-Fi stack preserved, dependency load/failure, tamper and kernel mismatch passed")

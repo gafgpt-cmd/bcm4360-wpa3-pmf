@@ -232,7 +232,7 @@ The new regression fails before the guard. On-air ingress remains untested.
 
 Revisions `ded5741` and `bdf1fac`: full test and lint commands passed on the connected CI host.
 For `bdf1fac`, the caller also ran both commands locally; all passed.
-Remote transcript: `omar-bdf1fac.log`, retained on the originating machine.
+Remote transcript: `installation-gate.log`, retained on the originating machine.
 The isolated image lacked OpenSSL headers, pkg-config and Gitleaks;
 checks ran in fresh host scratch with installed tools. No radio operations.
 Follow-up commits require their own remote checks.

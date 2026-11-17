@@ -33,7 +33,15 @@ def dependencies():
     path = state / "dependencies"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
-if name == "id":
+if name in ("mktemp", "install", "mv"):
+    restoring = any(".wl-wpa3-restore." in arg for arg in args)
+    failure = os.environ.get("FAIL_RESTORE_OP")
+    if restoring and failure == name:
+        sys.exit(1)
+    if restoring and name == "mv" and failure == "silent-mv":
+        sys.exit(0)
+    os.execv(os.environ["REAL_" + name.upper()], [name] + args)
+elif name == "id":
     print(os.environ.get("TEST_UID", "0"))
 elif name == "uname":
     print(os.environ.get("TEST_KERNEL", "test-kernel"))
@@ -125,7 +133,7 @@ elif name == "nmcli":
             print(active.read_text(encoding="utf-8").strip())
     elif args[:2] == ["-g", "connection.type"]:
         print(one("profile_type", "802-11-wireless"))
-    elif args[:2] == ["-g", "UUID"]:
+    elif args[:2] == ["-g", "connection.uuid"] and args[2:4] == ["connection", "show"]:
         print(one("profile_uuid", "uuid-selected"))
     elif args[:2] == ["connection", "up"]:
         if os.environ.get("FAIL_RECONNECT"):
@@ -143,7 +151,8 @@ else:
 ''', encoding="utf-8")
 dispatcher.chmod(0o700)
 for name in ("id", "uname", "modinfo", "findmnt", "systemd-path", "systemd-run",
-             "systemctl", "depmod", "modprobe", "rmmod", "insmod", "nmcli"):
+             "systemctl", "depmod", "modprobe", "rmmod", "insmod", "nmcli",
+             "mktemp", "install", "mv"):
     (stub / name).symlink_to(dispatcher)
 
 STOCK = b"stock module"
@@ -161,7 +170,7 @@ def manifest(directory, names):
 
 def write_manifests(bundle):
     manifest(bundle / "backup", ["wl.ko", "KERNEL", "SRCVERSION"])
-    manifest(bundle, ["trial.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL",
+    manifest(bundle, ["trial.sh", "install.sh", "revert.sh", "backup/wl.ko", "backup/KERNEL",
                       "backup/SRCVERSION", "backup/SHA256SUMS", "candidate/wl.ko"])
 
 
@@ -214,9 +223,11 @@ def case(name, fmt="ko", interfaces=("wlan0",), active="uuid-selected:wlan0",
     env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ["PATH"],
                TEST_STATE=str(state), HOME=str(state / "home"), TEST_UID="0",
                TEST_KERNEL="test-kernel")
+    for tool in ("mktemp", "install", "mv"):
+        env["REAL_" + tool.upper()] = shutil.which(tool)
     for key in ("FAIL_TIMER", "FAIL_LOAD", "FAIL_UNLOAD", "FAIL_DEPENDENCY", "FAIL_DEPMOD",
                 "FAIL_RECONNECT", "FAIL_MODPROBE", "WRONG_BACKUP", "WRONG_IDENTITY",
-                "NO_CONNECT", "MODPROBE_VERSION", "INSTALLED_VERSION"):
+                "NO_CONNECT", "MODPROBE_VERSION", "INSTALLED_VERSION", "FAIL_RESTORE_OP"):
         env.pop(key, None)
     return state, bundle, env, installed, installed.read_bytes()
 
@@ -502,6 +513,41 @@ assert result.returncode == 0, result.stderr
 assert (bundle / "backup/installed/module").read_bytes() == saved_state
 assert any(c[0] == "rmmod" for c in calls(state)[before:])
 assert installed.read_bytes() == CANDIDATE
+
+for fmt in ("ko", "zst"):
+    for failure in ("mktemp", "install", "mv", "silent-mv", "depmod", "directory"):
+        state, bundle, env, installed, original = case("restore-failure-" + fmt + failure, fmt=fmt)
+        assert run(bundle, env).returncode == 0
+        candidate_encoded = installed.read_bytes()
+        if failure == "depmod":
+            env["FAIL_DEPMOD"] = "always"
+        elif failure == "directory":
+            installed.rename(state / "displaced-module")
+            installed.parent.rename(state / "displaced-directory")
+        else:
+            env["FAIL_RESTORE_OP"] = failure
+        before = len(calls(state))
+        result = run(bundle, env, script="revert.sh")
+        assert result.returncode != 0, (failure, result.stdout, result.stderr)
+        assert "Installed module file restored" not in result.stdout
+        assert "could not restore" in result.stderr
+        assert not any(c[0] in ("rmmod", "insmod") for c in calls(state)[before:])
+        if failure != "directory":
+            assert installed.read_bytes() == (original if failure == "depmod" else candidate_encoded)
+
+for failure in ("mktemp", "install", "mv", "silent-mv", "depmod"):
+    state, bundle, env, installed, original = case("rollback-failure-" + failure)
+    env["FAIL_LOAD"] = "1"
+    if failure == "depmod":
+        env["FAIL_DEPMOD"] = "always"
+    else:
+        env["FAIL_RESTORE_OP"] = failure
+    result = run(bundle, env)
+    assert result.returncode != 0
+    assert "disk restoration is not confirmed" in result.stderr
+    assert "Reboot uses" not in result.stderr
+    assert (state / "timer").exists()
+    assert installed.read_bytes() == (original if failure == "depmod" else CANDIDATE)
 
 state, bundle, env, installed, original = case("revert-metadata-tamper")
 assert run(bundle, env).returncode == 0
