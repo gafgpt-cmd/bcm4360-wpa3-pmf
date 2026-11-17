@@ -1,29 +1,40 @@
 # 07. Verification
 
-Independent proofs that the contracts hold. Behavior, not recorded history.
+Deterministic host proofs, and a separate hardware matrix.
 
-## Rules
+## Two classes
 
-- Vectors come from standards or are generated independently, not copied from the implementation under test.
-- Tests assert properties, not a previous run's counts.
-- No test needs a network, a real AP or a live radio.
-- Every test is deterministic and bounded.
-- No secrets in fixtures, logs or failure output.
-- A random-looking value in a fixture is synthetic and documented as such.
+| Class | Runs on | Proves | Does not prove |
+| --- | --- | --- | --- |
+| Host tests | any Linux host, no radio | parsing, crypto contracts, replay, ownership, recovery stubs | kernel integration, firmware behavior, on-air security |
+| Hardware tests | the target machine and a real AP | association, key installation, link recovery | other boards, regulatory compliance, sustained throughput unless measured |
+
+No test is described as radio-free when it needs an AP. The hardware matrix is explicit.
+
+## Host test entry point
+
+```sh
+bash tests/check.sh
+```
+
+The suite compiles and runs the host PMF header, the RX wrapper harness, and the recovery and
+install stubs. It uses OpenSSL as the host crypto backend. The kernel module uses the Linux AES-CMAC
+library. Host tests do not establish kernel or radio behavior.
 
 ## Crypto vectors
 
+Vectors include the key, the message and the expected tag or ciphertext. An expected value is never
+derived from the code under test.
+
 | Test | Source | Assertion |
 | --- | --- | --- |
-| AES-CMAC empty message | RFC 4493 | tag equals `bb1d6929e95937287fa37d129b756746` |
-| AES-CMAC multi-block | RFC 4493 | each published tag matches |
-| AES-CCM | RFC 3610 | ciphertext and MIC match |
+| AES-CMAC empty message | RFC 4493 | key `2b7e...4f3c`, empty message, tag `bb1d6929e95937287fa37d129b756746` |
+| AES-CMAC multi-block | RFC 4493 | each published key, message and tag matches |
+| AES-CCM | RFC 3610 | key, nonce, AAD, plaintext and expected ciphertext plus MIC match |
 | BIP sign/verify | independent construction | verify accepts, then replay rejects |
-| BIP tamper | flip each bit | verify rejects |
+| BIP tamper | flip each body bit | verify rejects |
 | CCMP encrypt/decrypt | independent construction | round trip, then replay rejects |
-| CCMP tamper | flip each bit | decrypt or MIC fails |
-
-Do not derive an expected value from the code under test.
+| CCMP tamper | flip each body bit | decrypt or MIC fails |
 
 ## Frame location
 
@@ -35,8 +46,10 @@ Do not derive an expected value from the code under test.
 | No room | len 45, offset 38 | `EINVAL` |
 | Offset huge | offset `0xffffffff` | `EINVAL` |
 | Offset above len | offset > len | `EINVAL` |
-| Exact fit | len = offset + 6 + 4 | accepted |
-| One byte short | len = offset + 6 + 3 | rejected |
+| Exact fit | len = offset + 6 + pad + 4 | locator accepts |
+
+The exact-fit case proves the locator's bounds arithmetic only. It does not prove that a complete
+frame parses; full-frame parser acceptance is a separate case with a real header, body and FCS.
 
 ## Replay
 
@@ -51,6 +64,8 @@ Do not derive an expected value from the code under test.
 | `0xffffffffffff` | accept |
 | `0` after `0xffffffffffff` | reject |
 
+Replay advancement is tested after MIC success, not before it.
+
 ## Key install
 
 | Case | Expected |
@@ -60,7 +75,7 @@ Do not derive an expected value from the code under test.
 | ID `6` | reject |
 | Length `15` | reject |
 | Sequence length `5` | reject |
-| Sequence absent, length `6` | reject |
+| Sequence absent but length `6` | reject |
 | Same key, higher IPN | accept, floor raised |
 | Same key, lower IPN | accept, floor unchanged |
 | Different key | accept, floor replaced |
@@ -71,7 +86,7 @@ Do not derive an expected value from the code under test.
 | Mutation | Expected |
 | --- | --- |
 | Any body bit | reject |
-| MMIE key ID | reject if not `4/5` |
+| MMIE key ID | reject if not `4`/`5` |
 | MMIE element ID | reject |
 | MMIE length | reject |
 | MIC bit | reject |
@@ -96,6 +111,7 @@ Do not derive an expected value from the code under test.
 | Wrong MIC | reject |
 | Rekey then old PN | reject |
 | Rekey then new PN | accept |
+| Epoch changed between decrypt and verify | reject |
 
 ## RX path
 
@@ -103,41 +119,43 @@ Do not derive an expected value from the code under test.
 | --- | --- |
 | Non-linear skb | drop, no parse |
 | `skb->len < 20` | drop |
-| `skb->len > 4096` | drop |
 | Bad version bits | drop |
 | Bad offset | drop |
 | Frame shorter than 24 after FCS | drop |
 | FCS present in body | stripped once |
-| SAE auth before START | consumed |
-| SAE auth after START | forwarded |
-| SAE auth passed to blob | never |
+| SAE auth before START | consumed, no userspace event |
+| SAE auth after START | forwarded, then freed |
+| SAE auth passed to the object | never |
 | Unprotected deauth | dropped |
 | Unprotected deauth reason 6/7 | SA Query started |
 | Protected deauth valid | applied |
 | Protected deauth bad MIC | dropped |
 | Group robust frame bad BIP | dropped |
+| Block Ack after valid CCMP | Protected bit cleared, re-injected |
+| Block Ack without valid CCMP | dropped |
 | Data frame | passed through |
+| Version 1/2/3 on every handled subtype | dropped without normalization |
 
-## SAE state
+## SAE transport
 
 | Case | Expected |
 | --- | --- |
 | Placeholder observed | START after 40 ms |
 | Placeholder absent | START after 500 ms |
 | Duplicate START | ignored |
-| Status 0 | association drive |
-| Status 76/77/126/127 | forwarded, attempt fails |
-| Unknown status | forwarded, never success |
+| External-auth status 0 | association drive |
+| Status 76/77/126/127 | forwarded exactly once, no kernel interpretation |
+| Unknown status | forwarded, never mapped to success |
 | Association without `sae_ok` | refused |
 | Association without SAE AKM | refused |
 | MFP required, non-SAE AKM | `EOPNOTSUPP` |
-| Firmware roam during SAE | link dropped |
+| Device roam during SAE | link dropped |
 | Missing scb at advance | abort |
 | IE injection failure | abort |
 | Stale completion after epoch bump | dropped |
 | Disconnect during any state | all work cancelled |
 
-## Assoc IE ownership
+## Association IE ownership
 
 | Case | Expected |
 | --- | --- |
@@ -145,78 +163,76 @@ Do not derive an expected value from the code under test.
 | Inject other element | dropped |
 | Teardown | pointer and length cleared before free |
 | Later non-SAE join | no stale IE |
-| Read-only source | refused |
+| Read-only source left installed | refused; clear before teardown |
 
-## Concurrency
+## Concurrency and ownership
 
 | Case | Expected |
 | --- | --- |
 | Parallel key install | serialized, one winner |
-| Verify during rekey | old or new, never mixed |
+| Verify during rekey | old or new key, never mixed |
 | Verify during teardown | bounded, no use after free |
 | Cancel while running | callback tolerates cancellation |
 | Concurrent reset and RX | no double free, no index reuse |
 | Stress under lockdep | no inversion, no sleep in atomic |
-
-## Live behavior
-
-Run on real hardware only when the build is otherwise green.
-
-| Scenario | Expected |
-| --- | --- |
-| Connect to SAE AP | association with SAE AKM and MFP |
-| Disconnect and reconnect same BSS | bounded quiet gap, no stale IE |
-| Band switch | new attempt, no silent roam |
-| Radio off/on | link loss reported, clean down/up |
-| Password change | old keys cleared, new attempt |
-| Weak signal | SA Query resolves or link drops |
-| Bulk traffic | no MIC failures, no replay false positives |
-| PMF AP sends unprotected deauth | not obeyed |
-| PMF AP sends protected deauth | applied |
-| Rekey | traffic continues, PN resets per contract |
-| Suspend/resume | not supported; must report link loss if attempted |
-
-Suspend is listed to prove it fails safely, not to claim support.
-
-## Ownership tests
-
-| Case | Expected |
-| --- | --- |
 | RX consumed | freed once |
-| RX handed to blob | not freed by host |
+| RX handed to the object | not freed by host |
 | TX queued | not freed by host |
-| TX dropped before queue | freed with `send = true` |
+| TX never queued | freed with the drop flag |
 | Double delivery attempt | rejected by construction |
-| Free under re-entrant lock | forbidden; test detects |
 
-Fault injection: force allocation failure at each step and confirm unwind.
+Fault injection forces allocation failure at each step and confirms unwind.
+
+## Hardware matrix
+
+Run only with the built candidate, the exact kernel and a real AP. Record dates, module hash, kernel
+and AP security mode. Never record passwords, keys or full profiles.
+
+| Scenario | Expected | Current evidence |
+| --- | --- | --- |
+| SAE-only or transition AP | negotiated SAE, `pmf=2`, BIP group cipher | observed |
+| Explicit disconnect and reconnect, other band | fresh SAE and DHCP | observed |
+| Radio off/on | fresh SAE and DHCP | observed |
+| Gateway reachability over Wi-Fi | DHCP address and Wi-Fi gateway | observed |
+| Wrong password | clean failure, no fallback | not tested |
+| Protected deauth from AP | verified and applied | not tested on air |
+| Replayed management frame | rejected | not tested on air |
+| Group-addressed robust frame with bad MIC | dropped | not tested on air |
+| Weak signal loss and return | SA Query resolves or link drops | not tested |
+| AP group rekey | traffic continues | not tested |
+| Sustained data plane | no MIC or replay false positives; measured rate recorded | not measured |
+| Suspend/resume | upstream support inherited | not part of this matrix |
+| Long soak | no leak or stall | not performed |
+
+Absence of a row is not support. A row marked not tested is an open hardware check.
 
 ## Determinism gates
 
 - No network access.
 - No wall-clock dependence; use a monotonic test clock.
-- No random seeds without a fixed value.
-- No sleeps longer than the bounded timer under test.
+- No random seed without a fixed value.
+- No sleep longer than the bounded timer under test.
 - No reliance on host CPU count.
 - No secret material in fixtures.
+- No test that greps source text and calls that behavior.
 
 ## Pass criteria
 
 A change is verified when:
 
-1. Every crypto vector matches an independent source.
+1. Every crypto vector matches an independent key, message and tag.
 2. Every malformed input is rejected without a crash.
-3. Every replay and rekey case matches the table.
-4. Every SAE transition is legal or explicitly fails.
+3. Every replay, rekey and epoch case matches the table.
+4. Every SAE status is forwarded or consumed exactly as specified.
 5. Every packet is freed exactly once under fault injection.
 6. Lockdep is clean under stress.
 7. No secret appears in output.
-8. Live behavior matches the table, or the deviation is documented as a limit.
+8. The hardware rows claimed as observed were actually run; every other row stays open.
 
 ## What verification does not prove
 
-- It does not prove the device is fully understood.
-- It does not prove Mode A works on another artifact.
-- It does not prove regulatory compliance.
-- It does not prove suspend, power save or hardware crypto.
-- It does not replace board-specific calibration testing.
+- That the device is fully understood.
+- That Mode A works with another artifact.
+- That the result is regulatory compliant.
+- That suspend, power save or hardware crypto work in a native port.
+- That on-air security was measured without an independent capture.

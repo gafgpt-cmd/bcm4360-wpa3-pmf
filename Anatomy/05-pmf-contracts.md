@@ -4,9 +4,8 @@ Protected management frames: crypto, replay, key lifetime, SA Query, teardown.
 
 ## Scope
 
-Host software implements PMF. The device may offload data-frame CCMP; it must not be trusted for management protection.
-
-Two mechanisms:
+Host software implements PMF. The device may offload data-frame CCMP; it is never trusted for
+management protection.
 
 | Mechanism | Protects | Cipher |
 | --- | --- | --- |
@@ -15,7 +14,7 @@ Two mechanisms:
 
 ## Keys
 
-| Key | ID | Size | Index |
+| Key | ID | Size | Slot |
 | --- | --- | --- | --- |
 | IGTK | `4` | 16 bytes | `0` |
 | IGTK | `5` | 16 bytes | `1` |
@@ -27,20 +26,24 @@ IGTK install rules:
 - Key must be exactly 16 bytes.
 - Optional sequence is 6 bytes, little-endian IPN.
 - Same key bytes: keep the higher IPN, ignore a lower one.
-- Different key bytes: replace, set IPN to the supplied value.
-- Reject any other ID or length before touching state.
+- Different key bytes: replace and set IPN to the supplied value.
+- Reject any other ID, length or sequence length before touching state.
 - Serialize install, verify and delete.
 
 PTK install rules:
 
-- 16 bytes.
-- Key change resets TX PN to `1`.
-- First install after association starts TX PN at `0x1000000`.
-- Key delete clears the ready flag before freeing any transform.
+- 16 bytes, CCMP only.
+- A first or changed key sets the software TX PN to `1`.
+- A same-key reinstall leaves the TX PN and the RX floor unchanged.
+- Install brackets the epoch: increment before publishing the key, increment again after, so a
+  stable key always has an even epoch.
+- Delete clears the key and replay floor before freeing the transform.
 
 ## BIP
 
 ### MMIE layout
+
+The MMIE is the last 18 bytes of the frame.
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -48,17 +51,16 @@ PTK install rules:
 | `1` | 1 | length `16` |
 | `2` | 2 | key ID, little-endian |
 | `4` | 6 | IPN, little-endian |
-| `10` | 6 | reserved |
-| `16` | 8 | MIC |
+| `10` | 8 | MIC |
 
-The MMIE is the last 18 bytes of the frame.
+There is no reserved field. The total is 18 bytes: 10 bytes of header and IPN, then the MIC.
 
 ### BIP input
 
 ```text
 AAD  = FC[0] || (FC[1] & ~0x38) || A1 || A2 || A3     (20 bytes)
-data = frame[24 .. len-8]                               (body, MMIE included)
-pad  = 8 zero bytes
+data = frame[24 .. len-8]                               (body and MMIE header + IPN)
+pad  = 8 zero bytes                                     (CMAC length extension)
 MIC  = AES-CMAC(IGTK, AAD || data || pad)[0..8]
 ```
 
@@ -74,28 +76,21 @@ Frame acceptance before crypto:
 | Check | Reject when |
 | --- | --- |
 | Length | `< 44` or `> 4096` |
-| Destination | address 1 is not group-addressed |
-| Frame control | reserved or unsupported bits set |
-| Fragment | fragment number nonzero |
-| Subtype | not deauth, disassoc or action |
+| Destination | address 1 is not group-addressed (`f[4] & 1` clear) |
+| Frame control | any of `f[1] & 0xc7` set (toDS, fromDS, more fragments, protected, order) |
+| Fragment | `f[22] & 0x0f` nonzero |
+| Subtype | not deauth (`0xc0`), disassoc (`0xa0`) or action (`0xd0`) |
 | MMIE | element ID not `76` or length not `16` |
 | Key ID | not `4` or `5` |
 
 Then:
 
 1. Read IPN.
-2. Require key valid.
-3. Require `IPN > last`.
-4. Compute MIC over the AAD and body.
+2. Require the key to be valid.
+3. Compare IPN against the floor; reject `0`, above 48 bits, or not greater than the floor.
+4. Compute the MIC over AAD, body and pad.
 5. Compare 8 bytes in constant time.
-6. Advance IPN only on success.
-
-Replay:
-
-- Reject IPN `0`.
-- Reject IPN `> 0xffffffffffff`.
-- Reject IPN `<= last`.
-- Advance after MIC success, before dispatch.
+6. Advance the IPN only after the MIC succeeds.
 
 ## CCMP
 
@@ -117,11 +112,15 @@ Replay:
 | --- | --- | --- |
 | `0` | 2 | frame control, protected bit set, retry/power/more-data cleared |
 | `2` | 18 | address 1, address 2, address 3 |
-| `20` | 2 | sequence control, fragment bits only |
+| `20` | 2 | sequence control, fragment bits only (`& 0x000f`) |
+
+The frame-control value is built as `(fc & ~0x3800) | 0x4000`. That clears retry, power management
+and more-data, and sets the Protected bit.
 
 ### CCMP header and PN
 
-- 8-byte CCMP header precedes the encrypted body.
+- An 8-byte CCMP header precedes the encrypted body.
+- The header's second byte is `0x20 | (key_id << 6)`.
 - PN is 48 bits, assembled from header bytes `0,1,4,5,6,7`:
 
 ```text
@@ -129,22 +128,23 @@ PN = h[0] | h[1]<<8 | h[4]<<16 | h[5]<<24 | h[6]<<32 | h[7]<<40
 ```
 
 - MIC is 8 bytes, appended after the ciphertext.
-- AES-CCM with 13-byte nonce, 22-byte AAD, 8-byte MIC.
+- AES-CCM with a 13-byte nonce, 22-byte AAD and 8-byte MIC.
 
 Replay:
 
 - Reject PN `0`.
-- Reject PN `> 0xffffffffffff`.
-- Reject PN `<= last`.
-- Advance before dispatch.
+- Reject PN above `0xffffffffffff`.
+- Reject PN not greater than the floor.
+- Advance the floor after MIC success, before dispatch.
 
 TX:
 
 - Fetch and increment a 64-bit counter under a spinlock.
-- Reject `0` or `> 0xffffffffffff`.
+- Reject `0` or a value above 48 bits.
 - Write PN little-endian into the CCMP header.
-- Initial value `0x1000000`.
-- After a PTK change, reset to `1`.
+- Initial value after a successful association is `0x1000000`.
+- A first or changed PTK resets it to `1`.
+- A same-key reinstall does not reset it.
 
 ## Constant time
 
@@ -158,26 +158,29 @@ TX:
 | Event | IGTK | PTK |
 | --- | --- | --- |
 | Association | install per AP | install after 4-way |
-| Rekey | replace on new key bytes | replace, reset TX PN |
+| Rekey | replace on new key bytes | replace, reset software TX PN and RX floor |
+| Same-key reinstall | keep the higher IPN | leave TX PN and RX floor |
 | Disconnect | clear | clear |
 | Reset | clear | clear |
 | Detach | clear and free transforms | clear and free transforms |
 
 Rules:
 
-- A key is unusable until `valid` is set.
-- Clear `valid` before freeing a transform.
-- A stale frame must not verify against a replaced key.
-- Same-key reinstall must not lower the IPN floor.
+- A key is unusable until its valid flag is set.
+- Clear the valid flag before freeing a transform.
+- A frame must not verify against a replaced key.
+- Every verify checks the epoch captured before decryption against the current even epoch.
+- A stale frame must not verify against a replaced key or a deleted key.
 
 ## SA Query
 
-Purpose: confirm the link when the AP claims we are not associated, instead of obeying a spoofed teardown.
+Purpose: confirm the link when the AP claims we are not associated, instead of obeying a spoofed
+teardown.
 
 Trigger:
 
 - Unprotected deauth or disassoc with reason `6` or `7`.
-- Link check after resume or repeated TX failure.
+- Link probe after a stalled-link window, when enabled.
 
 Frame:
 
@@ -189,15 +192,15 @@ Frame:
 
 Procedure:
 
-1. Send request with a fresh TID.
+1. Send a request with a fresh TID.
 2. Wait `300 ms`.
 3. Retry up to `3` times.
 4. Any matching response clears the transaction.
-5. No response after the limit: treat the link as lost, disconnect.
+5. No response after the limit: treat the link as lost and disconnect.
 
 Rules:
 
-- Match response by category, action and TID.
+- Match by category, action and TID.
 - A response for a different TID does not clear the transaction.
 - Only one transaction in flight.
 - The responder runs in process context; the RX path only queues.
@@ -208,23 +211,26 @@ Rules:
 
 | Received frame | Protected | Action |
 | --- | --- | --- |
-| Deauth | yes, valid MIC | apply reason, disconnect |
-| Disassoc | yes, valid MIC | apply reason, disconnect |
-| Deauth | no | drop; reason 6/7 -> SA Query |
-| Disassoc | no | drop; reason 6/7 -> SA Query |
-| Deauth | yes, bad MIC | drop |
-| Deauth | no, other reason | drop |
+| Deauth | valid MIC | apply reason, disconnect |
+| Disassoc | valid MIC | apply reason, disconnect |
+| Deauth | unprotected | drop; reason 6 or 7 starts SA Query |
+| Disassoc | unprotected | drop; reason 6 or 7 starts SA Query |
+| Deauth | bad MIC | drop |
+| Deauth | unprotected, other reason | drop |
 
-Never apply an unprotected teardown as authoritative. A protected teardown is authoritative after MIC and replay checks.
+Never apply an unprotected teardown as authoritative. A protected teardown is authoritative only
+after MIC and replay checks.
 
-Reason codes that indicate a lost association (`6`, `7`) are the ones that warrant SA Query rather than immediate disconnect.
+Reason codes `6` and `7` indicate a lost association and warrant SA Query instead of an immediate
+disconnect.
 
 ## Block Ack under PMF
 
 - Block Ack action frames are robust management frames.
 - They must be CCMP-protected when PMF is active.
 - Verify before handling or re-injecting.
-- Do not pass unverified Block Ack frames to the device.
+- Never pass an unverified Block Ack frame to the device.
+- On TX, protect the device's own ADDBA/DELBA frames before they are queued.
 
 ## Group-addressed robust management
 
@@ -233,19 +239,19 @@ Reason codes that indicate a lost association (`6`, `7`) are the ones that warra
 - Verify BIP first; dispatch only on success.
 - A group frame with a bad MIC is dropped, not forwarded.
 
-## Protocol vs local policy
+## Protocol versus local policy
 
-| Rule | Kind | Notes |
+| Rule | Kind | Note |
 | --- | --- | --- |
-| IGTK IDs `4/5` | protocol | fixed by 802.11 |
-| MMIE `76`, length `16` | protocol | fixed |
+| IGTK IDs `4`/`5` | protocol | fixed by 802.11 |
+| MMIE ID `76`, length `16`, total `18` | protocol | fixed |
 | BIP MIC `8` | protocol | fixed |
 | CCMP MIC `8` | protocol | fixed |
 | Nonce and AAD layout | protocol | fixed |
 | PN/IPN 48-bit | protocol | fixed |
-| Reject PN `0` | local policy | conservative; matches current host |
-| Initial TX PN `0x1000000` | local policy | avoids short-session reuse |
-| SA Query `300 ms` x `3` | local policy | bounded, tunable |
+| Reject PN `0` | local policy | conservative |
+| Initial TX PN `0x1000000` | local policy | keeps management PN above short data sessions |
+| SA Query `300 ms` x `3` | local policy | bounded and tunable |
 | Drop unprotected teardown | protocol plus policy | 802.11w defense |
 | Only one SA Query in flight | local policy | simplification |
 
@@ -254,10 +260,10 @@ Local policy may change values. Protocol layout may not.
 ## Invariants
 
 1. Management protection is host software.
-2. Verify MIC before any side effect.
-3. Advance replay before dispatch.
-4. MIC compare is constant time.
-5. A replaced key invalidates the old floor.
+2. MIC verification precedes every side effect.
+3. Replay advances only after MIC success.
+4. MIC comparison is constant time.
+5. A replaced or deleted key invalidates the old floor.
 6. No unprotected teardown is authoritative.
 7. Group robust frames use BIP and need no Protected bit.
 8. Keys are zeroized on delete and detach.

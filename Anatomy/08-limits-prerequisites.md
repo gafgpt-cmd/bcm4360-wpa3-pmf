@@ -1,57 +1,77 @@
 # 08. Limits and prerequisites
 
-What is not known, not supported, and required before code can work.
+What is required, what is proven, and what each mode still lacks.
 
 ## Status
 
-- Specification only.
+- The shipping driver is Mode A in C. It is the only mode with live evidence.
+- Mode A works on 2.4 GHz and 5 GHz and inherits upstream suspend support.
+- Mode B is a native-port specification. No Rust driver is implemented.
 - No complete recoverability is claimed.
-- No working Rust driver is claimed.
-- Mode A is a compatibility bridge for one artifact.
-- Mode B is a research path with open prerequisites.
 
 ## Required inputs
 
 | Input | Needed by | Source | If missing |
 | --- | --- | --- | --- |
-| Microcode image | A and B | board/vendor package | radio does not run |
-| Board SROM/OTP/NVRAM | A and B | device or vendor data | no MAC address, no calibration |
-| PHY/radio init tables | B | board data | radio deaf or unstable |
-| TX power/PA tables | B | board data | transmit undefined |
+| Microcode image | A and B | device or vendor package | radio does not run |
+| Board SROM/OTP/NVRAM | A and B | device or board data | no MAC address, no calibration |
+| AC-PHY and radio init tables | B | board data | radio deaf or unstable |
+| TX power and PA tables | B | board data | transmit undefined |
 | Regulatory limits | A and B | host regdb plus board data | illegal or clamped operation |
 | Core revisions | B | device probe | register bases unknown |
-| DMA ring layout | B | board data or reference | TX/RX cannot start |
+| DMA ring layout | B | board data or public b43 work | TX/RX cannot start |
 | Exact artifact hash | A | the one supported build | refuse to load |
 
 Microcode and calibration are inputs, not constants. Do not embed them in the repository.
 
-## Unsupported or unverified
+## Compat limitations (Mode A, current C driver)
 
 | Area | Status |
 | --- | --- |
-| Other BCM4360 revisions | unverified |
-| Sibling device IDs | unsupported unless listed |
-| 5 GHz operation | unverified; depends on board and regulatory data |
-| VHT80 / wider channels | unverified |
-| 80+80, MU-MIMO, beamforming | unsupported |
-| Power save | unsupported |
-| Suspend/resume | unsupported; must fail safely |
-| ASPM | do not enable |
-| WoWLAN | unsupported |
-| Hardware crypto for management | not used |
-| Hardware crypto for data | assumed only; not proven |
-| TX calibration | open prerequisite for Mode B |
-| Antenna diversity | unverified |
-| Bluetooth coexistence | unsupported |
-| Monitor mode / injection | unsupported |
-| AP / mesh / IBSS | out of scope |
-| Fast roaming (802.11r) | out of scope |
-| FILS | out of scope |
-| SAE-PK | out of scope |
-| OWE | out of scope |
-| 6 GHz | unsupported |
+| 2.4 GHz and 5 GHz | works |
+| Suspend/resume | inherited from upstream; reconnect behavior is part of the live record |
+| WPA3-SAE with PMF | works on the tested AP and board |
+| WPA2-PSK with PMF | refused; this object builds its own PSK RSN element without PMF |
+| Hardware crypto for management | not used; management protection is host software |
+| Hardware crypto for data | object-managed; not a management dependency |
+| Other BCM4360 boards | untested |
+| Other artifact builds | rejected by the hash gate |
+| Monitor mode, injection, AP, mesh, IBSS | out of scope |
+| 6 GHz, VHT80+, MU-MIMO, beamforming | unsupported |
+| Power save, ASPM, WoWLAN | unsupported or not enabled by default |
+| SAE-PK, FILS, OWE, 802.11r | out of scope |
+| Sustained throughput | not claimed by this specification; measure before publishing |
 
-Absence from this table is not support. It means untested.
+The current driver is not "unsupported hardware". It has a working 5 GHz path and upstream suspend
+support. Those capabilities belong to Mode A and must not be projected onto a future native port.
+
+## Native limitations (Mode B, not implemented)
+
+| Area | Status |
+| --- | --- |
+| MAC, PHY, DMA, interrupts | new code required |
+| Microcode load and status | new code required |
+| Board calibration and TX power | new code required |
+| 5 GHz | must be implemented; not inherited |
+| Suspend/resume | must be implemented or explicitly reported as link loss; not inherited |
+| PMF and SAE transport | should come from mac80211/cfg80211, not a new stack |
+| Performance | unknown |
+
+A native port that lacks 5 GHz or suspend is a limitation of that port, not evidence that the
+current driver lacks them.
+
+## Hardware init basis
+
+Do not invent a register map or a reset sequence. A native port starts from the public b43 work:
+
+| Need | Public basis |
+| --- | --- |
+| Core rev 40/42 MAC setup, 64-bit DMA, MAC/PHY fixes | b43 series in the external references |
+| AC-PHY and radio 2069 attach | b43 AC-PHY series |
+| AC microcode TX/RX formats | b43 AC microcode series |
+| Board calibration and SROM/OTP parsing | board data plus existing b43 board code |
+
+Where that work is incomplete, state the gap. Do not fill it with a guessed register write.
 
 ## Inferred types
 
@@ -65,20 +85,8 @@ Absence from this table is not support. It means untested.
 | struct padding | compiler default | medium; offsets are observed, not derived |
 | endianness | little-endian | fixed by target |
 
-Offsets in file 02 are observed bytes, not a C layout. Do not compute them from a reconstructed struct.
-
-## Unresolved indirect targets
-
-| Target | Why it matters |
-| --- | --- |
-| Blob internal functions | a relink or rebuild can move them |
-| Return thunks / PLT stubs | a wrong redirect can hard-lock |
-| Auth state advancer | only one known address |
-| Association builder | depends on internal state and IE layout |
-| Packet free path | ownership mismatch corrupts the heap |
-| TX completion path | null station context crashes |
-
-The bridge is valid only for the exact artifact and the exact redirect set. Any change invalidates it.
+Offsets in file 02 are observed bytes, not a C layout. Do not compute them from a reconstructed
+struct.
 
 ## Kernel ABI differences
 
@@ -93,7 +101,11 @@ The bridge is valid only for the exact artifact and the exact redirect set. Any 
 | `net_device` | registration and stats |
 | module loading | symbol visibility |
 
-Pin a kernel range and test at both ends. Do not assume a newer kernel accepts the same ops struct.
+Pin one kernel range and test at both ends. Do not assume a newer kernel accepts the same ops
+struct.
+
+The current candidate is built for `7.2.15-1-omarchy`. A built module is bound to that kernel's
+`vermagic`. Rebuild for any other kernel before preparing a trial bundle.
 
 ## Regulatory constraints
 
@@ -107,12 +119,12 @@ Pin a kernel range and test at both ends. Do not assume a newer kernel accepts t
 ## Mode A prerequisites
 
 1. Exact artifact hash matches.
-2. Artifact loads and links against the target kernel.
+2. The artifact links against the target kernel.
 3. Required symbols are globalized and the redirect set applies cleanly.
-4. Auth clamp passthrough applied at the validated offset.
+4. The auth clamp passthrough is applied at the validated offset.
 5. PCI probe, BAR map and IRQ work.
-6. Packet free callback is wired.
-7. Management TX/RX taps are installed.
+6. The packet free callback is wired.
+7. Management TX and RX taps are installed.
 8. Userspace SAE and RSN are available.
 9. Board data is present for the installed card.
 
@@ -124,7 +136,7 @@ Missing any one: Mode A does not run.
 2. Microcode load protocol and status decoding known.
 3. SROM/OTP layout known, including MAC address and calibration sections.
 4. DMA descriptor layout, ring sizes and index/status addresses known.
-5. PHY/radio init tables known.
+5. AC-PHY and radio init tables known.
 6. TX calibration and power tables known.
 7. Regulatory mapping known.
 8. Reset and clock/GPIO sequences known.
@@ -137,7 +149,7 @@ Mode B cannot start from this document alone.
 | --- | --- | --- |
 | Wrong offset | memory corruption | hash gate plus checked accessors |
 | Wrong ownership | double free or leak | one-owner rule plus fault injection |
-| Missing lock | race, crash | lock order plus lockdep |
+| Missing lock | race or crash | lock order plus lockdep |
 | Stale pointer after teardown | use after free | epoch plus clear on teardown |
 | Wrong replay floor | accept replay or drop valid | table-driven tests |
 | Non-constant-time MIC | side channel | constant-time primitive |
@@ -146,46 +158,13 @@ Mode B cannot start from this document alone.
 | Uncalibrated radio | deaf or illegal TX | require board data |
 | Wrong microcode | dead or unstable MAC | version check |
 
-## Known gaps
+## Open items
 
 - No complete register map.
-- No proven microcode load sequence for this board.
-- No proven TX calibration.
-- No power-save or suspend support.
-- No hardware-crypto proof for management frames.
+- No proven microcode load sequence for a native port.
+- No native TX calibration.
+- No native 5 GHz or suspend implementation.
+- No hardware-crypto proof for management frames, because management crypto is host software.
 - No multi-board validation.
 - No regulatory certification.
-- No performance characterization.
-- No long-duration stability claim.
-
-## Prerequisite checklist
-
-Before writing device code:
-
-- [ ] Exact board identified.
-- [ ] Core revisions read and matched.
-- [ ] Board data available and parsed.
-- [ ] Microcode image available and version-checked.
-- [ ] DMA layout documented from data, not guess.
-- [ ] PHY tables available.
-- [ ] Regulatory source chosen.
-- [ ] Kernel range pinned.
-- [ ] Artifact hash gate implemented (Mode A).
-- [ ] Fail-closed policy encoded.
-- [ ] Verification plan from file 07 accepted.
-
-## Honest claims
-
-Supported by this document:
-
-- A precise host-side contract for SAE transport, PMF, RX/TX framing and ownership.
-- A hash-gated compatibility seam for one artifact.
-- A test plan that can falsify the contracts.
-
-Not supported:
-
-- That the device is fully understood.
-- That any artifact can be swapped in.
-- That the driver works on all BCM4360 boards.
-- That suspend, power save, hardware crypto or TX calibration work.
-- That the result is ready for production.
+- No on-air security or sustained-throughput claim.

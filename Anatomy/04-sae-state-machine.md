@@ -4,9 +4,11 @@ Per-attempt lifecycle for WPA3-SAE, with PMF fail-closed rules.
 
 ## Principle
 
-SAE mathematics runs in userspace. The kernel transports frames, owns policy, and drives the device into association only after userspace reports success.
+SAE mathematics runs in userspace. The kernel transports frames, owns policy, and drives the device
+into association only after userspace reports success through external-auth completion.
 
-The device firmware does not understand SAE. It still emits one authentication frame so it enters its own authenticating state. That frame is a placeholder. It is not the SAE exchange.
+The device does not understand SAE. It still emits one authentication frame so it enters its own
+authenticating state. That frame is a placeholder. It is not the SAE exchange.
 
 ## States
 
@@ -14,9 +16,9 @@ The device firmware does not understand SAE. It still emits one authentication f
 | --- | --- | --- | --- |
 | `IDLE` | no connect | none | none |
 | `JOIN_DEFERRED` | waiting out rejoin quiet time | schedule join work | issue join |
-| `JOIN_SENT` | `WLC_SET_SSID` accepted | arm RX tap | wait for stub |
-| `STUB_WAIT` | waiting for firmware placeholder auth | start grace timer | start external auth |
-| `EXT_AUTH` | userspace owns the exchange | forward auth frames | userspace result |
+| `JOIN_SENT` | join accepted | arm RX tap | wait for stub |
+| `STUB_WAIT` | waiting for the placeholder auth | start grace timer | start external auth |
+| `EXT_AUTH` | userspace owns the exchange | forward auth frames | external-auth result |
 | `ASSOC_DRIVE` | auth done, injecting IEs | install IEs, advance | wait for association |
 | `ASSOC_WAIT` | association in flight | arm watchdog | link up or failure |
 | `RUN` | associated, keys installed | normal data path | disconnect |
@@ -29,12 +31,12 @@ The device firmware does not understand SAE. It still emits one authentication f
 | --- | --- | --- | --- | --- |
 | `IDLE` | connect | SAE AKM | `JOIN_DEFERRED` or `JOIN_SENT` | save request, arm |
 | `JOIN_DEFERRED` | quiet timer | still desired | `JOIN_SENT` | issue saved join |
-| `JOIN_SENT` | firmware auth alg 3 seen | armed | `STUB_WAIT` | start 40 ms grace |
+| `JOIN_SENT` | placeholder auth alg 3 seen | armed | `STUB_WAIT` | start 40 ms grace |
 | `STUB_WAIT` | grace expired | armed | `EXT_AUTH` | request external auth |
 | `STUB_WAIT` | 500 ms fallback | armed | `EXT_AUTH` | request external auth |
-| `EXT_AUTH` | status 0 | bsscfg valid | `ASSOC_DRIVE` | inject IEs, advance |
-| `EXT_AUTH` | status nonzero | any | `FAILED` | abort join, report |
-| `ASSOC_DRIVE` | advance returned | scb valid | `ASSOC_WAIT` | arm 3000 ms watchdog |
+| `EXT_AUTH` | external-auth status 0 | `bsscfg` valid | `ASSOC_DRIVE` | inject IEs, advance |
+| `EXT_AUTH` | external-auth status nonzero | any | `FAILED` | abort join, report |
+| `ASSOC_DRIVE` | advance returned | `scb` valid | `ASSOC_WAIT` | arm 3000 ms watchdog |
 | `ASSOC_WAIT` | link up event | success | `RUN` | start 4-way watchdog |
 | `ASSOC_WAIT` | watchdog | timeout | `FAILED` | abort, report |
 | `RUN` | 4-way complete | keys installed | `RUN` | clear watchdog |
@@ -42,18 +44,20 @@ The device firmware does not understand SAE. It still emits one authentication f
 | any | disconnect | any | `CANCELLED` | cancel all work |
 | any | new connect | any | `CANCELLED` then new | bump epoch |
 
-Any transition not listed is illegal. An illegal transition cancels the attempt and reports failure; it does not guess.
+Any transition not listed is illegal. An illegal transition cancels the attempt and reports failure;
+it does not guess.
 
 ## Placeholder and external START
 
-The firmware's placeholder frame:
+The placeholder frame:
 
 - is sent for every SAE join,
-- is required so the firmware enters its authenticating state,
+- is required so the device enters its authenticating state,
 - is rejected by the AP,
 - must precede the real SAE commit.
 
-If the real SAE commit goes first, the later placeholder makes the AP discard its SAE state and the join collapses.
+If the real commit goes first, the later placeholder makes the AP discard its SAE state and the join
+collapses.
 
 Therefore:
 
@@ -61,47 +65,53 @@ Therefore:
 2. If the placeholder is not observed, start after `500 ms`.
 3. Before START, consume SAE authentication frames; do not forward them.
 4. After START, forward every SAE authentication frame to userspace.
-5. Consume SAE authentication frames in the kernel; never pass them to the firmware.
+5. Consume SAE authentication frames in the kernel; never pass them to the device.
 
 START is idempotent per attempt. A second START without a new attempt is ignored.
 
-## Status preservation
+## Status forwarding
 
-Forward authentication status unchanged. Do not rewrite, normalize, or interpret it in the kernel.
+After external-auth START, forward every SAE authentication status unchanged. The kernel does not
+rewrite, normalize or interpret it. Userspace decides.
 
-| Status | Meaning class | Kernel action |
+| Status | Meaning | Kernel action |
 | --- | --- | --- |
-| `0` | success | drive association |
-| `76` | SAE anti-clogging / retry class | forward unchanged |
-| `77` | SAE retry class | forward unchanged |
-| `126` | SAE failure class | forward unchanged |
-| `127` | SAE failure class | forward unchanged |
-| other | as received | forward unchanged |
+| `0` | success | forward |
+| `76` | anti-clogging token required | forward |
+| `77` | unsupported finite cyclic group | forward |
+| `126` | hash-to-element required | forward |
+| `127` | SAE-PK negotiation | forward |
+| other | as received | forward |
 
 Rules:
 
 - A pre-START frame is consumed, including its status.
-- A post-START frame with status nonzero fails the attempt; the exact number is preserved for userspace and logs.
+- A post-START frame is always forwarded, including every nonzero status.
+- Only the external-auth completion drives association or abort:
+  status `0` drives association; any nonzero status aborts the pending join.
 - Never map an unknown status to success.
 - Never retry SAE in the kernel. Userspace decides.
 
 ## Association IE injection
 
-After SAE success, userspace supplies the association request IEs. The firmware's association builder copies an RSN element verbatim when present.
+After SAE success, userspace supplies the association request IEs. The device's association builder
+copies an RSN element verbatim when present.
 
 | Field | Value |
 | --- | --- |
 | Allowed element IDs | `48` (RSN), `244` (RSNX) |
 | Storage | `assoc + 0x30` pointer, `assoc + 0x38` length |
 | Content | RSN + RSNX exactly as userspace supplied |
-| Buffer | writable, host-owned allocation |
+| Buffer | writable, host-owned allocation or static host buffer |
 
 Rules:
 
-- Copy into a host-owned, writable buffer. Never point at read-only module data.
+- Copy into a buffer the host owns for the life of the injection.
+- Never point at read-only module data without clearing the pointer before teardown.
 - Inject only RSN and RSNX. Drop other elements.
 - Length must equal the copied bytes.
-- The firmware may `MFREE` the buffer on BSS teardown. Clear `+0x30` and `+0x38` and release the host buffer before any teardown.
+- The device may free the buffer on BSS teardown. Clear `+0x30` and `+0x38` and release the host
+  buffer before any teardown.
 - Stale IEs must not survive into a later non-SAE join.
 - Release on every connect, disconnect and detach.
 
@@ -115,7 +125,7 @@ If the association request would not carry the SAE AKM and MFPC bits, fail close
 | SAE connect, no userspace SAE | reject |
 | Association without `sae_ok` | refuse to advance |
 | Association request without SAE AKM | refuse to send |
-| Firmware-initiated roam during SAE | drop link, report disconnect |
+| Device-initiated roam during SAE | drop link, report disconnect |
 | Missing AP `scb` at advance | abort, report failure |
 | IE injection fails | abort, report failure |
 
@@ -132,15 +142,15 @@ No silent downgrade. No Open/PSK fallback for a WPA3-SAE request.
 | Join retry limit | `3` | then report failure |
 | Rejoin quiet gap | `2000 ms` | after disconnect |
 | 4-way timeout | `3500 ms` | associated but no keys |
-| Deauth settle | `40 ms` | observe whether protected deauth was ACKed |
+| Deauth settle | `40 ms` | observe whether the protected deauth was ACKed |
 | SA Query retry | `300 ms` | per request |
-| SA Query limit | `3` | then treat link as lost |
+| SA Query limit | `3` | then treat the link as lost |
 
 Timers are per attempt. A new attempt cancels all timers from the previous attempt.
 
 ## Join retry
 
-A firmware-reported join failure (not "no networks") is retried silently:
+A device-reported join failure, other than "no networks", is retried silently:
 
 1. Wait `1000 ms`.
 2. Reissue the saved join for the same BSS.
@@ -153,19 +163,21 @@ Do not retry on "no networks". Do not scan-hop in the kernel.
 
 Every attempt carries a generation number.
 
-- Increment on connect, disconnect, and abort.
+- Increment on connect, disconnect and abort.
 - Every asynchronous completion checks its generation before touching state.
 - Stale completions are dropped, not applied.
-- On cancel: stop RX tap, cancel all delayed work synchronously, release IEs, clear captured pointers.
+- On cancel: stop the RX tap, cancel all delayed work synchronously, release IEs, clear captured
+  pointers.
 
 Work items that must be cancelled:
 
-- start/fallback,
+- start and fallback,
 - association watchdog,
 - 4-way watchdog,
 - join retry,
 - deferred join,
-- SA Query retry.
+- SA Query retry,
+- protected teardown worker.
 
 Cancellation must be safe when the work is already running.
 
@@ -181,10 +193,10 @@ After a disconnect, wait `2000 ms` before a new join to the same BSS.
 
 | Event | Action |
 | --- | --- |
-| Firmware roam before SAE success | drop link |
-| Firmware roam after `RUN` | userspace-driven reconnect only |
+| Device roam before SAE success | drop link |
+| Device roam after `RUN` | userspace-driven reconnect only |
 | Band switch during SAE | fail the attempt |
-| BSSID change without new connect | fail the attempt |
+| BSSID change without a new connect | fail the attempt |
 
 The kernel does not silently roam during SAE. A new BSS is a new attempt.
 
@@ -195,17 +207,17 @@ The kernel does not silently roam during SAE. A new BSS is a new attempt.
 | Association timeout | failure, retryable |
 | 4-way timeout | disconnect |
 | SA Query exhausted | disconnect |
-| Unprotected deauth/disassoc | do not obey; SA Query if reason 6/7 |
+| Unprotected deauth/disassoc | do not obey; SA Query if reason 6 or 7 |
 | Protected deauth/disassoc | apply reason |
 | Reset or down | disconnect |
 
 ## Invariants
 
-1. Userspace owns SAE; kernel owns transport and policy.
-2. Placeholder precedes real commit.
+1. Userspace owns SAE; the kernel owns transport and policy.
+2. The placeholder precedes the real commit.
 3. Pre-START frames are consumed.
-4. Statuses pass through unchanged.
-5. Association only after `sae_ok`.
+4. Every post-START status is forwarded unchanged.
+5. Association happens only after external-auth status `0`.
 6. Injection is RSN/RSNX only, host-owned, released before teardown.
 7. Stale completions are dropped by generation.
 8. No downgrade, ever.

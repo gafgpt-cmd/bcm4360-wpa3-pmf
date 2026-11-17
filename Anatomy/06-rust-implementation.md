@@ -1,57 +1,77 @@
 # 06. Rust implementation plan
 
-Module structure, kernel interfaces, ownership and acceptance for a Rust host driver.
+Design constraints for a Rust host driver. No Rust driver is implemented.
 
-## Crate shape
+## Reuse mac80211
+
+A native port is a **mac80211 driver**, not a cfg80211 driver that rebuilds management.
+
+| Layer | Owner | Consequence |
+| --- | --- | --- |
+| SAE, RSN, 4-way, key derivation | `wpa_supplicant` | kernel never sees the password or SAE state |
+| Management frame construction and parsing | mac80211 | do not duplicate auth/assoc/action builders |
+| External SAE transport | cfg80211 `external_auth` | forward auth frames; do not interpret status |
+| PMF (BIP, CCMP management, SA Query) | mac80211 where the kernel supports it | do not reimplement in Rust |
+| Block Ack | mac80211 | do not hand-roll ADDBA state |
+| Data crypto | mac80211 and kernel crypto | no device offload dependency |
+| Hardware, DMA, interrupts, calibration | the Rust driver | the only new code |
+
+The Mode A C driver reimplements much of this because the frozen object bypasses mac80211. A native
+port must not copy that design into Rust.
+
+## Artifact status
+
+The pinned target kernel tree supplies generated Rust metadata (`.rmeta`) but no Rust kernel source.
+Therefore this document names no specific Rust kernel API, module or trait. Use subsystem contracts
+and thin C bindings where the Rust surface is not present. Any API name asserted without a source
+tree is a guess and must not enter code or tests.
+
+## Module shape
+
+A design sketch, not an existing tree:
 
 ```text
 bcm4360/
   src/lib.rs            module entry, PCI driver, lifecycle
   src/device.rs         BAR mapping, reset, IRQ, DMA rings
-  src/rx.rs             frame location, validation, dispatch
-  src/tx.rs             management frame build and queue
-  src/sae.rs            SAE state machine and epochs
-  src/pmf.rs            BIP, CCMP, replay, SA Query
-  src/keys.rs           key install/delete, zeroization
-  src/abi.rs            Mode A seam accessors and extern calls
-  src/shim.c            optional C glue (cfg80211, blob calls)
+  src/rx.rs             descriptor handling, frame handoff to mac80211
+  src/tx.rs             descriptor handling, frame handoff from mac80211
+  src/cal.rs            board data and calibration inputs
+  src/abi.rs            Mode A seam accessors, if compat is built
+  src/shim.c            cfg80211/mac80211 registration, crypto and workqueue glue
 ```
 
-- `#![no_std]` kernel module.
-- Use the kernel crate for allocation, locks, workqueues, PCI, DMA, MMIO and IRQ.
-- No userspace libraries. No `std`. No global allocator outside the kernel one.
-- Edition and MSRV follow the target kernel. Do not pin newer than the kernel supports.
+- Kernel module; no `std` and no userspace libraries.
+- Allocation, locks, workqueues, PCI, DMA, MMIO and IRQ come from the kernel.
+- Edition and MSRV follow the target kernel. Do not pin newer than the kernel accepts.
 
 ## Two builds
 
 | Build | Feature | Contains |
 | --- | --- | --- |
-| A. Compat | `compat-abi` | `abi.rs`, blob calls, hash gate |
-| B. Native | default | `device.rs` native MAC/PHY path |
+| A. Compat | `compat-abi` | `abi.rs`, object calls, hash gate |
+| B. Native | default | `device.rs` MAC/PHY/DMA path, mac80211 registration |
 
-Both share `sae.rs`, `pmf.rs`, `keys.rs`, `rx.rs`, `tx.rs` contracts.
-
-The compat build is not the target. It exists to validate the host contracts against a working MAC.
+Both share the SAE transport and PMF policy contracts in files 04 and 05. The compat build is a
+validation bridge; it is not the target.
 
 ## Kernel interfaces
 
-| Need | Preferred | Fallback |
-| --- | --- | --- |
-| Allocation | kernel `KBox`, `KVec`, `KVVec` | `alloc` with kernel allocator |
-| Mutex | `kernel::sync::Mutex` | C shim mutex |
-| Spinlock | `kernel::sync::SpinLock` | C shim spinlock |
-| Workqueue | `kernel::workqueue` | C shim `work_struct` |
-| Delayed work | `kernel::workqueue::DelayedWork` | C shim `delayed_work` |
-| PCI | `kernel::pci::Device`, `Bar` | C shim probe |
-| MMIO | `kernel::io::Io` | `readl`/`writel` shim |
-| DMA | `kernel::dma` | C shim `dma_alloc_coherent` |
-| IRQ | `kernel::irq::Registration` | C shim `request_irq` |
-| cfg80211 | C shim ops | none in Rust yet |
-| crypto | C shim `crypto_aead` / `crypto_shash` | pure Rust AES-CMAC and CCM |
+| Need | Use |
+| --- | --- |
+| Allocation | kernel allocator |
+| Mutex, spinlock | kernel lock primitives |
+| Workqueue, delayed work | kernel workqueue |
+| PCI, BAR mapping | kernel PCI API |
+| MMIO | kernel I/O accessors |
+| DMA | kernel DMA API |
+| IRQ | kernel IRQ registration |
+| cfg80211, mac80211 | C shim registration and callbacks |
+| AES-CMAC, AES-CCM | kernel crypto API; C shim only when Rust bindings are absent |
 
-Use a C shim only where the kernel Rust API does not yet expose the subsystem. Keep the shim thin: register, call one Rust entry point, return.
-
-Do not reimplement AES or CMAC in Rust unless the kernel crypto API is unavailable. If reimplemented, it must pass the vectors in file 07 and be constant time.
+Do not implement AES or CMAC in Rust. The current C driver relies on the kernel AES-CMAC library and
+a synchronous `ccm(aes)` transform. A native port uses the same kernel crypto contracts. There is no
+pure-Rust crypto fallback: if the kernel API is unavailable, the feature is unavailable.
 
 ## Ownership model
 
@@ -61,19 +81,19 @@ Do not reimplement AES or CMAC in Rust unless the kernel crypto API is unavailab
 | BAR mapping | adapter | probe to remove |
 | DMA rings | adapter | up to down |
 | Link session | adapter, replaced per connect | connect to disconnect |
-| Keys | session | install to delete |
+| Keys | mac80211 or session | install to delete |
 | Epoch | adapter, atomic | monotonic |
-| RX skb | host until consumed or handed off | one path |
-| TX skb | host until queued | one path |
-| Userspace SAE state | userspace | never in kernel |
+| RX skb | mac80211 after handoff | one path |
+| TX skb | device after queue | one path |
+| SAE state | userspace | never in kernel |
 
 Rules:
 
-- One `LinkSession` per attempt. A new attempt replaces it; the old one is dropped and zeroized.
-- Keys live in the session, not globally.
-- Captured blob pointers live only in a session and are cleared on teardown.
-- Packets are owned by exactly one component at a time.
-- No `Arc` cycle between adapter and session.
+- One link session per attempt. A new attempt replaces it; the old one is dropped and zeroized.
+- Keys live in the session or in mac80211, never in two places.
+- Captured object pointers live only in a compat session and are cleared on teardown.
+- Packets have exactly one owner at a time.
+- No reference cycle between adapter and session.
 
 ## Concurrency
 
@@ -83,11 +103,11 @@ Acquire top to bottom. Never reverse.
 
 | Order | Lock | Type | Protects |
 | --- | --- | --- | --- |
-| 1 | `cfg_lock` | mutex | cfg80211/rtnl-facing state |
-| 2 | `dev_lock` | mutex | reset, queues, blob calls |
-| 3 | `state_lock` | spinlock | session state, epoch |
-| 4 | `key_lock` | spinlock | IGTK, PTK, TX PN |
-| 5 | `replay_lock` | spinlock | RX replay floors |
+| 1 | cfg lock | mutex | cfg80211/rtnl-facing state |
+| 2 | device lock | mutex | reset, queues, object calls |
+| 3 | state lock | spinlock | session state, epoch |
+| 4 | key lock | spinlock | IGTK, PTK, TX PN |
+| 5 | replay lock | spinlock | RX replay floors |
 
 Rules:
 
@@ -98,14 +118,11 @@ Rules:
 
 ### Epochs
 
-```text
-epoch: AtomicU64
-```
-
 - Increment on connect, disconnect, reset and abort.
+- Key install brackets the epoch: even means stable, odd means installing.
 - Every completion captures the epoch and rechecks before applying.
 - A stale completion is dropped.
-- Epoch wrap is not a practical concern; use `fetch_add`.
+- Use `fetch_add`; wrap is not a practical concern.
 
 ### Cancellation
 
@@ -118,99 +135,83 @@ epoch: AtomicU64
 ### Probe
 
 1. Match `14e4:43a0`.
-2. Enable device, set bus master.
+2. Enable the device, set bus master.
 3. Map BARs.
-4. Read core revisions and reject unknown.
+4. Read core revisions; reject unknown combinations.
 5. Load board data.
-6. Load microcode.
-7. Attach MAC, then PHY.
-8. Register IRQ.
-9. Register network/cfg80211 interface.
+6. Load and start microcode.
+7. Attach the MAC, then the PHY.
+8. Register the IRQ.
+9. Register with mac80211/cfg80211.
 
-Any failure unwinds in reverse.
+Any failure unwinds in reverse. Partial init must not leave DMA armed.
 
 ### Reset and up/down
 
 - `down`: stop TX, mask IRQ, drain rings, clear session.
-- `up`: reinit rings, enable IRQ, start queues.
+- `up`: reinitialise rings, enable IRQ, start queues.
 - `reset`: down, core reset, up.
 - Reset reports link loss; it does not silently restore association.
+- Suspend/resume is a link loss unless the port explicitly re-establishes it. Do not claim resume.
 
 ### IRQ
 
 - Top half acknowledges and schedules deferred work.
 - Deferred work processes completions and RX.
 - No sleeping in the top half.
-- Spurious IRQ returns `IRQ_NONE` and changes nothing.
+- A spurious IRQ returns the not-mine result and changes nothing.
 
 ## RX layer
 
-- Locate frame from `wlc + 0x6bc` in compat mode; from the native descriptor in native mode.
-- Validate per file 03 before any parse.
-- Reject non-linear skbs.
-- Strip FCS once.
-- Route:
-
-| Frame | Route |
-| --- | --- |
-| SAE auth after START | userspace |
-| SAE auth before START | consume |
-| protected robust mgmt | verify CCMP then handle |
-| group robust mgmt | verify BIP then handle |
-| unprotected teardown | drop, maybe SA Query |
-| data | device/host data path |
-
-- Free exactly once.
+- Locate the frame from the native descriptor, not from `wlc + 0x6bc`; the offset field is a Mode A
+  compatibility seam.
+- Validate length, offset and version before parsing.
+- Hand management and data frames to mac80211; do not build a second dispatch tree.
+- Free or hand off exactly once.
 
 ## TX layer
 
-- Build management frames through the device interface.
-- Never hand-build the MAC header if the helper exists.
-- Reserve CCMP header and MIC space before encryption.
-- Queue with the real station context.
-- On failure, free with the correct ownership flag.
+- Accept frames from mac80211.
+- Do not build the MAC header or management body in the driver.
+- Reserve crypto space only when mac80211 has not already done so.
+- Queue with the station context supplied by mac80211.
+- On failure, return the frame to mac80211 for freeing.
 
 ## SAE layer
 
-State machine from file 04. Timers and generations. No crypto.
+mac80211 and cfg80211 already provide external-auth transport. The driver only moves frames.
 
-Public surface:
+Design pseudocode:
 
-```rust
-trait SaeTransport {
-    fn start(&self, epoch: u64) -> Result;
-    fn forward(&self, epoch: u64, frame: &[u8]) -> Result;
-    fn cancel(&self, epoch: u64);
-}
+```text
+on auth frame:
+    if external_auth_started:
+        cfg80211_rx_mgmt(frame)
+    else:
+        drop
+on external_auth(status):
+    if status == 0:
+        mac80211 proceeds to association
+    else:
+        mac80211 aborts and reports failure
 ```
 
-The kernel calls `start` after the placeholder grace, forwards post-START frames, and cancels on teardown.
+Do not reimplement SAE timers, status interpretation or association injection. Those exist in the
+Mode A C bridge only because the object bypasses mac80211.
 
 ## PMF layer
 
-Public surface:
+Use mac80211's PMF support for management protection, BIP, replay and SA Query. The driver does not
+own a second CCMP implementation.
 
-```rust
-trait Pmf {
-    fn install_igtk(&self, id: u8, key: &[u8; 16], seq: Option<&[u8; 6]>) -> Result;
-    fn verify_bip(&self, frame: &[u8]) -> Result<()>;
-    fn verify_ccmp(&self, frame: &[u8]) -> Result<Vec<u8>>;
-    fn install_ptk(&self, tk: &[u8; 16]) -> Result;
-}
-```
-
-- `verify_*` advances replay only on success.
-- `verify_ccmp` returns plaintext or an error; never partial output.
-- Key install is serialized.
-- All comparisons constant time.
+If a kernel lacks a required PMF capability, the correct result is a refused WPA3 connection, not a
+private crypto stack.
 
 ## Key layer
 
-- Fixed-size arrays for keys, not heap buffers.
-- `valid` flag before use.
-- Zeroize on delete and detach with a volatile write or the kernel's secure erase.
-- Never log key bytes.
-- Never expose keys through debugfs or sysfs.
+- Keys are owned by mac80211 or by the device key table.
+- The driver never logs key bytes and never exposes them through debugfs or sysfs.
+- Zeroize any driver-local copy on delete and detach.
 
 ## Error model
 
@@ -228,32 +229,33 @@ Map to kernel errno at the boundary. Do not invent positive error codes.
 
 ## Unsafe boundary
 
-- All blob calls and all raw offset access live in `abi.rs`.
-- Each accessor validates pointer non-null, offset within the documented table, and type width.
-- No `unsafe` in `sae.rs`, `pmf.rs`, `keys.rs` except for zeroization and atomics.
-- Every `unsafe` block has a safety comment naming the invariant.
+- Raw offset access exists only in `abi.rs`, only for the compat build.
+- Each accessor checks null, documented offset and width.
+- `unsafe` outside `abi.rs` is limited to atomics and zeroization.
+- Every `unsafe` block names the invariant that makes it sound.
+- A non-null pointer plus a known offset is not proof of allocation bounds or liveness.
 
 ## Acceptance criteria
 
 | # | Criterion | Proof |
 | --- | --- | --- |
-| 1 | Builds against target kernel | module build |
+| 1 | Builds against the target kernel | module build |
 | 2 | Hash gate rejects a wrong artifact | unit test |
 | 3 | RX validation rejects malformed frames | unit tests |
 | 4 | PMF vectors pass | unit tests |
-| 5 | Replay and rekey behavior correct | unit tests |
-| 6 | SAE transitions legal only | state tests |
-| 7 | No secrets in logs or files | manual audit plus secret scan |
-| 8 | Lock order holds under stress | lockdep clean |
+| 5 | Replay, rekey and epoch behavior correct | unit tests |
+| 6 | SAE transport forwards all post-START statuses | transport test |
+| 7 | No secrets in logs or files | secret scan |
+| 8 | Lock order holds under stress | lockdep |
 | 9 | No double free | fault injection |
 | 10 | Down/up and reset idempotent | repeated runs |
-| 11 | Link loss reported, never silent | live test |
-| 12 | No management protection depends on device crypto | code audit |
+| 11 | Link loss is reported, never silent | hardware test |
 
 ## What this plan does not do
 
-- Does not claim a working driver.
+- Does not claim a working Rust driver.
+- Does not name Rust kernel APIs that the pinned tree does not supply.
 - Does not define a register map.
-- Does not implement SAE, RSN parsing or the 4-way handshake.
+- Does not implement SAE, RSN parsing, the 4-way handshake, PMF or Block Ack.
 - Does not enable power save, suspend or hardware crypto by default.
 - Does not make Mode A portable to another artifact.

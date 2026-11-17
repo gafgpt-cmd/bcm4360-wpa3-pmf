@@ -1,203 +1,139 @@
-# WPA3-SAE + 802.11w on the Broadcom BCM4360 (closed `wl` blob)
+# WPA3-SAE and 802.11w for the Broadcom BCM4360
 
-Apple/Broadcom never gave the **BCM4360** (`14e4:43a0`) WPA3. Its only Linux driver is the
-closed `broadcom-sta` (`wl`) blob; `brcmfmac` can't drive it. This fork extends the upstream
-WPA3-SAE bridge with **BIP-CMAC-128 integrity and management replay protection** in host software,
-with **no firmware source**. Local changes are listed in [FORK.md](FORK.md).
+The BCM4360 (`14e4:43a0`) has no WPA3 in its closed `wl` driver. This project adds a host-side SAE
+transport and software protected management frames (PMF) to the open cfg80211 glue that surrounds
+the proprietary object.
 
-All on-air measurements below describe upstream revisions, before these local PMF changes.
-Current evidence and required gates are recorded in [TESTING.md](TESTING.md).
+It is a C compatibility layer, not a native driver. `wpa_supplicant` runs SAE and the 4-way
+handshake; the kernel carries frames; host code verifies BIP and CCMP for management frames and
+answers SA Query. The vendor object still owns the MAC, rate control and aggregation.
 
-## How it works
+## Status
 
-The blob is a **non-stripped, relocatable ELF `.o`** (not a final firmware image) — that is the
-whole reason this works. We don't rewrite it; we **link new C against it** and **redirect a few
-call sites**:
+| Proven | Not claimed |
+| --- | --- |
+| Host tests for PMF, replay, framing and recovery stubs | A native Rust driver |
+| One live session with SAE, `pmf=2` and BIP as the group cipher | On-air forgery or replay resistance measured independently |
+| Explicit reconnect on the other band, radio off/on | Sustained throughput or a full stress matrix |
+| DHCP over Wi-Fi after association | Other boards, other object builds, suspend certification |
 
-- `wpa_supplicant` runs SAE + the 4-way (the blob's crypto is SHA-1-only; SAE needs SHA-256).
-- A small cfg80211 glue (`wl_cfg80211_hybrid.c`, `wl_linux.c`) bridges auth/assoc/keys.
-- Three build steps make the blob hookable:
-  1. **P1 byte-patch** — un-clamp the `auth` iovar so it accepts SAE (alg=3).
-  2. **`objcopy --globalize-symbol`** — make ~10 blob-internal functions callable from our C.
-  3. **`wl_reloc.py`** — rewrite `.rela.text` so the blob's calls to
-     `wlc_recv`/`wlc_sendauth`/`wlc_authresp_client` land in our `__wrap_*` hooks.
+Current evidence and the open hardware rows are in [TESTING.md](TESTING.md). Read that before
+treating any capability as validated on your machine.
 
-That's enough to drive SAE frames over the air, inject `wpa_supplicant`'s RSN IE into the
-assoc-req, install userspace-derived keys, and add software PMF: BIP-CMAC-128 verification
-for group robust management frames and a shared CCMP replay floor for protected unicast
-management frames, including SA-Query, Block Ack and teardown.
-After external-auth START, every SAE status reaches `wpa_supplicant`, including negotiation
-and rejection statuses. Pre-START replies are consumed to avoid aborting a reconnect.
-During SAE or PMF, RX rejects unsupported 802.11 protocol versions before blob dispatch.
+## Documentation
 
-## Reverse engineering
+| Page | Contents |
+| --- | --- |
+| [Anatomy](Anatomy/README.md) | Implementable contracts for SAE, PMF, framing, the frozen ABI and a future native port |
+| [TESTING.md](TESTING.md) | Gate status, local evidence and the hardware test protocol |
+| [LOCAL.md](LOCAL.md) | Temporary trial and reversible current-kernel install |
+| [FORK.md](FORK.md) | Every upstream file this fork changes |
+| [docs/upstream-history.md](docs/upstream-history.md) | Original upstream engineering notes and test history, with provenance |
+| [build.sh](build.sh) | Blob preparation, patch, relocate, link |
 
-Tools: Ghidra (headless), `nm`, `objdump`, `strings`, a monitor-mode sniffer (`iw` + `tcpdump`).
+## Architecture
 
-```sh
-# 1. The blob ships inside broadcom-sta and is NOT stripped (~4091 syms) -> Ghidra recovers names.
-GHIDRA=/opt/ghidra
-$GHIDRA/support/analyzeHeadless ./proj wl -import wlc_hybrid.o_amd64 \
-    -analysisTimeoutPerFile 3600          # auto-analyze, then decompile in the GUI
-
-# 2. Triage what's present BEFORE picking a strategy (absent crypto must move host-side):
-nm wlc_hybrid.o_amd64 | grep -iE 'sha256|sae|bip|igtk|mmie'          # -> empty here
-nm wlc_hybrid.o_amd64 | grep -iE 'wpa|akm|sup|sendauth|key_insert'
-
-# 3. Verify any offset before you patch it (.text vaddr V == file offset V+0x40 in this blob):
-objdump -d --start-address=0x47d40 --stop-address=0x47d60 wlc_hybrid.o_amd64
+```mermaid
+flowchart LR
+    NM["NetworkManager"] --> WS["wpa_supplicant<br/>SAE + 4-way"]
+    WS --> CFG["cfg80211"]
+    CFG --> GLUE["wl_cfg80211_hybrid.c<br/>SAE transport, PMF, SA Query"]
+    GLUE <--> CRYPTO["kernel crypto<br/>AES-CMAC + ccm(aes)"]
+    GLUE --> TAP["RX/TX taps<br/>wl_linux.c"]
+    TAP --> BLOB["wlc_hybrid.o_amd64<br/>hash-gated object"]
+    BLOB --> HW["BCM4360<br/>D11 MAC + AC-PHY"]
+    HW --> TAP
 ```
 
-Strategy: start at the cfg80211 entry points in the **open** glue (`wl_cfg80211_connect`,
-`wl_set_auth_type`) and follow the iovars (`auth`, `wpa_auth`, `wsec`) into the blob. Decompile
-what they reach: the AKM gate (`bcmwpa_akm2WPAauth`), the join/auth FSM (`wlc_join_BSS` + the
-auth→assoc advancer at `0x5b79d`), the RX dispatch (`wlc_recv`), and the PMK/key path
-(`wlc_sup_set_pmk`, `wlc_key_insert`). Cross-check every address with `objdump`.
+The blob is a non-stripped, relocatable ELF object, not a final firmware image. That is what makes
+the bridge possible: the build links new C against it and redirects a small set of call sites.
 
-## Porting to another chip
+## How the bridge works
 
-1. Confirm the blob is a **non-stripped relocatable `.o`** (`file`, `nm`). A stripped firmware
-   image won't work this way.
-2. In Ghidra find: the **auth-alg clamp**, the **join→auth→assoc FSM** + its "auth-succeeded"
-   advancer, the **RX dispatch**, and `set_pmk`/key-insert.
-3. Put their addresses in `build.sh` (`--add-symbol re_auth_advance=...`, the globalize list) and
-   `patches/wl_reloc.py` (the `__wrap_*` targets).
-4. Fix the struct offsets in `wl_linux.c` (`wlc+0x6a8` txq, `bsscfg+0x320` assoc, `scb+0x18` bss)
-   — these are layout and **differ per blob version**.
-5. Iterate on-air with a sniffer; firmware faults are kernel panics — capture `dmesg` over the
-   network (see Struggles).
+1. `wpa_supplicant` performs SAE and the 4-way handshake.
+2. The cfg80211 glue captures the SAE exchange through the RX tap and forwards every post-START
+   authentication status to userspace.
+3. The glue injects the supplicant's RSN and RSNX elements into the association request.
+4. Host PMF verifies BIP for group robust management and CCMP for unicast management, keeps replay
+   floors, sends SA Query and handles protected teardown.
+5. Block Ack action frames are decrypted, re-injected, and the object's own ADDBA/DELBA frames are
+   protected before transmission.
 
-## Struggles → solutions
+Three build steps prepare the object:
 
-- **Kernel hard-locks during SAE, no backtrace.** A `--add-symbol` address was off by one hex
-  digit (`0x15b79d` vs `0x5b79d`), landing mid-instruction → `call <garbage>` → NX fault.
-  *Verify every synthetic symbol is a real function start (`objdump -d --start-address=...`).
-  (Older kernels flagged this at build time with `objtool: ... can't find starting instruction`;
-  since Linux 6.15 objtool cannot process the blob at all, so the Makefile skips it for the final
-  `wl.o` link and that safety net is gone.)*
-- **Can't capture the panic.** efi-pstore is broken on Apple EFI; netconsole can't TX over a
-  USB-ethernet NIC. *Stream `dmesg --follow` over SSH to a second machine — it flushes the oops
-  before the reboot.*
-- **AP rejects assoc (status 31, MFP policy).** The blob builds its own PSK/no-MFP RSN IE.
-  *Capture `wpa_supplicant`'s `sme->ie` in `.connect` and point the blob's assoc-req IE buffer
-  (`*(bsscfg+0x320)+0x30`) at it — also satisfies the 4-way's RSN-IE check.*
-- **Key install fails `-22`** — only the IGTK (BIP, idx 4); the HW key engine has no BIP slot.
-  *Accept the IGTK in software; PTK/GTK install fine and data flows.*
-- **Blob never decrypts management frames**, so 802.11w SA-Queries arrive as ciphertext.
-  *Capture the PTK and do AES-CCM in software (kernel `ccm(aes)`) to read the query and emit an
-  encrypted response.*
+| Step | Effect |
+| --- | --- |
+| Byte patch | un-clamp the `auth` iovar so it accepts SAE (`alg=3`) |
+| Symbol globalization | expose the object's internal call targets to the wrapper |
+| Relocation rewrite | redirect `wlc_recv`, `wlc_sendauth`, `wlc_authresp_client` and `wlc_sendmgmt` calls to host wrappers |
+
+## Capabilities
+
+| Capability | State |
+| --- | --- |
+| WPA3-SAE transport through cfg80211 external auth | working in the tested session |
+| Every post-START SAE status forwarded unchanged | working; covered by host tests |
+| BIP-CMAC-128 group cipher negotiation | observed in the live session |
+| BIP verification and replay | covered by host tests |
+| CCMP for unicast management, replay floors and SA Query | covered by host tests |
+| Protected Block Ack setup under PMF | implemented; not separately recorded in the live evidence |
+| Stalled-link probe using retry ratio | implemented; probe-only by default |
+| Bounded reconnect, rejoin quiet time, handshake watchdog | implemented |
+| Reversible trial and installation with rollback | implemented; regression-tested with stubs |
+
+The repository does not ship the proprietary object or a built module.
 
 ## Build
 
-Needs matching kernel headers, `gcc`, `binutils`, `python3`. The blob is **not** in this repo
-(proprietary). The local patch requires the kernel AES-CMAC library API
-(`crypto/aes-cbc-macs.h`); the upstream build range below does not establish compatibility
-with this patch. PMF operation also requires synchronous `ccm(aes)`.
+Requirements: matching kernel headers, `gcc`, `binutils`, `python3`, and the Linux AES-CMAC and
+synchronous `ccm(aes)` crypto support.
+
+The object is **not** in this repository. Obtain the pristine file from broadcom-sta
+`6.30.223.271` and verify its hash:
+
+```text
+sha256 352a6e349f74c69b78e76f68c63752c99b8f6b22dc942af531b754211d7f4743
+```
 
 ```sh
-# 1. Get the pristine blob from broadcom-sta 6.30.223.271:
-#    hybrid-v35_64-nodebug-pcoem-6_30_223_271.tar.gz  ->  lib/wlc_hybrid.o_amd64
 mkdir -p wl-src/lib
 cp /path/to/wlc_hybrid.o_amd64 wl-src/lib/wlc_hybrid.o_amd64.orig
-#    Debian/Ubuntu: it is the same file the broadcom-sta-dkms package ships
-#    (sha256 352a6e349f74c69b78e76f68c63752c99b8f6b22dc942af531b754211d7f4743):
-#    If already installed, instead of the cp above:
-#      cp /usr/src/broadcom-sta-6.30.223.271/lib/wlc_hybrid.o_amd64 wl-src/lib/wlc_hybrid.o_amd64.orig
-
-# 2. Build:
-./build.sh                 # -> wl-src/wl.ko
+./build.sh        # -> wl-src/wl.ko
 ```
 
-## Temporary trial
+A built `wl.ko` is bound to the exact kernel it was built for (`vermagic`). Rebuild for any other
+kernel before preparing a trial bundle. The current candidate targets `7.2.15-1-omarchy`.
 
-Use the gated recovery bundle described in [LOCAL.md](LOCAL.md#temporary-trial-bundle).
-Keep installed modules, Wi-Fi profiles, passwords and router settings unchanged.
-All elevated live operations are for the user to run after required gates pass.
-The inherited [DKMS installer documentation](dkms/README.md) is reference material;
-a reversible install for the running exact kernel is in
-[LOCAL.md](LOCAL.md#persistent-current-kernel-install). No DKMS registration.
+## Trial and install
 
-### Debug logging
-The driver is quiet by default. For a bug report, or to watch the WPA3/PMF state machine, enable
-verbose logging (BSSIDs and the RSN IE are logged, so scrub them before posting):
-```sh
-echo 1 | sudo tee /sys/module/wl/parameters/re_verbose          # this boot: state machine, EAPOL, firmware events
-echo 2 | sudo tee /sys/module/wl/parameters/re_verbose          # + the blob's TX/RX counters every 5 s
-```
+- Temporary, reversible trial: [LOCAL.md](LOCAL.md#temporary-trial-bundle)
+- Persistent current-kernel install with saved-module rollback:
+  [LOCAL.md](LOCAL.md#persistent-current-kernel-install)
 
-### Throughput with PMF (WPA3) and Block Ack
-With 802.11w the AP protects its Block-Ack action frames (ADDBA/DELBA), which the blob cannot
-decrypt, and drops the blob's own unprotected ones. Without a Block-Ack agreement there is no frame
-aggregation and the AP keeps re-sending its ADDBA Request: SAE ran at about 14 Mbit/s with 17% TX
-retries where WPA2-PSK reached about 190 Mbit/s. The driver now decrypts the AP's Block-Ack frames in
-software and hands them to the blob, and CCMP-protects the blob's own, so the agreement is set up
-normally (SAE 150-210 Mbit/s down, 0% retries on the same link). Module parameter `re_pmf_ba`:
-`2` (default) = full, `1` = decline the AP's ADDBA (no aggregation), `0` = off.
+Both paths keep the installed module, Wi-Fi profiles and router settings unchanged until the user
+runs the elevated step. A reboot restores the stock module in both modes.
 
-### Stalled-link recovery (PMF / WPA3)
-In soak tests under load a PMF link occasionally went bad without any deauth: after a scan the blob's rate
-control ran away to its top rate and almost nothing we sent was ACKed any more (about one retry per frame),
-while the stack kept showing "connected" until the connection was restarted by hand. The driver now watches
-the retry counters in 12 s windows (windows containing a scan are ignored, scans always cost a burst of
-retries). A window with retries >= 70% of the frames sent triggers an SA Query probe; no answer drops the
-link, and if the AP answers but the link stays that bad for 3 windows (about 36 s) the link is dropped
-anyway (opt-in, `re_pmf_stall=2`), so wpa_supplicant reconnects (a few seconds). Module parameter `re_pmf_stall`: `1` (default) =
-probe only, `0` = off, `2` = probe and drop, `3` = test mode (every window counts as bad). The drop is not the default
-because an idle 2.4 GHz link showed false alarms overnight (about one retry per frame, SA Query answered). The cause of the rate
-runaway itself is not understood (it was seen 4 times in about 60 scans with the Block-Ack handling above, and
-never in about 150 scans without it).
+## Compatibility
 
-## WPA2/WPA3 transition-mode APs
+The current C driver:
 
-An existing **WPA3 (SAE)** profile selects WPA3; a `wpa-psk` profile connects with WPA2 by design.
-On a FRITZ!Box 6690 in WPA2/WPA3 mixed mode this is stable: 45 min soaks with an AP group-key rekey every
-10 min, 16 back-to-back disconnect/reconnect cycles, suspend/resume.
+- works on 2.4 GHz and 5 GHz,
+- inherits upstream suspend support,
+- requires WPA3-SAE for PMF; a WPA2-PSK profile that requires PMF is refused rather than connected
+  without protection,
+- rejects a non-SAE join when MFP is required.
 
-What had to be fixed to get there (details in the commit messages):
-- **The association request was malformed.** SAE connects carry `wpa_versions = WPA3`, which the glue did not
-  know, so the blob ran with WPA off and added a bogus legacy-WPA IE; we also pasted wpa_supplicant's whole IE
-  buffer next to the blob's own, duplicating Extended Capabilities. The AP accepted such a station but then
-  failed every group-key rekey, deauthenticated it, and the link sat "up" but dead. Now only the RSN/RSNX
-  elements are injected and `wpa_auth` is right from the start.
-- **The AP dropping us used to be invisible.** Its management frames are CCMP-protected (the blob can't
-  decrypt them) and unprotected deauths are filtered. Now a protected deauth/disassoc is verified in software
-  and honoured, an unprotected "class 2/3" deauth triggers a software SA Query (no answer -> reconnect), and
-  the association is probed after resume.
-- **Two races/bugs in the glue:** the host SAE exchange could start before the blob's own stub auth frame
-  (which made the AP drop the join; it now follows the stub), and the cfg80211 BSS lookup used pre-4.1
-  arguments so a connect could be silently discarded when the scan entry had expired.
-- **Bounded reconnect time.** A failed join (the AP answers "try again later", or not at all, when the BSS
-  we just left is re-joined) is retried silently up to 3 times; an association with no 4-way handshake is
-  dropped after 3.5 s instead of 10 s; the protected deauth sent on disconnect is retransmitted if the
-  firmware reports it un-ACKed; there are at least 2 s between a disconnect and the next join.
+A future native port may lack 5 GHz or suspend initially. Those would be limitations of that port,
+not of the current driver.
 
-If the AP uses the same SSID on 2.4 and 5 GHz, wpa_supplicant picks the stronger BSS; pin one with
-`802-11-wireless.band a|bg` or `802-11-wireless.bssid` if you want.
-
-**Known issues**
-- Re-joining the BSS you just left is the AP's weak spot (FRITZ!Box: "try again later" / no answer in
-  30-40% of back-to-back reconnects). The driver absorbs it; the cost is an occasional ~5 s reconnect instead
-  of ~1-2 s. WPA2-PSK median 1.7 s, max 5.4 s; SAE 0.3-1.1 s in 16-cycle stress tests.
-- A synchronous `ccm(aes)` implementation is required for protected unicast management RX,
-  including SA-Query and teardown. Without it these frames are dropped, so SAE/PMF operation
-  is not usable. `re_pmf_ba=0` disables Block Ack handling only; it does not bypass verification.
-- PMF only works with WPA3-SAE here: the blob builds the RSN element of a WPA2-PSK join itself, without PMF.
-  NetworkManager does not ask for PMF on WPA2-PSK profiles (its PMF setting is ignored there); a direct
-  wpa_supplicant config with `ieee80211w=2` and WPA-PSK is refused instead of connecting without PMF.
-
-## Upstream test history
-
-| Kernel | How | Result |
-|---|---|---|
-| 7.3.0-9 (Ubuntu 26.10) | loaded and used, Intel MacBookPro11,1 (BCM4360), FRITZ!Box 6690 in WPA2/WPA3 mixed mode (2.4 + 5 GHz, same SSID) | 45 min SAE soak: 529 pings, 0 outages, 6 AP rekeys accepted; 16 + 16 back-to-back reconnects (SAE / WPA2) all connected, none over 5.4 s; WPA2-PSK and SAE profiles switch without reloading; clean `rmmod`/`insmod`; wrong password fails cleanly; suspend/resume reconnects by itself; no kernel warnings |
-| 6.12, 6.14, 6.17, 7.0, 7.1, 7.2 | build only, against the mainline-PPA header packages | builds |
-| 6.12 (Debian 13) | loaded and used, MacBookPro11,3, WPA3-only AP (previous release) | worked |
+Public b43 work already covers parts of this chip. This project targets the closed `wl` path; it
+does not claim to be the only Linux approach to BCM4360 hardware.
 
 ## Caveats
 
-- The blob (`wlc_hybrid.o_amd64`) is **Broadcom proprietary** — get it from broadcom-sta yourself.
-  Built `wl.ko` modules embed it. Never commit or publish blobs or built modules in this fork.
-- Offsets are specific to broadcom-sta **6.30.223.271 / BCM4360**.
-- A built `wl.ko` is tied to the exact kernel it was built for (`vermagic`); rebuild for any
-  other kernel before preparing a trial bundle.
-- Research code. License: GPL-2.0 (this wrapper) + Broadcom's license (the blob).
+- `wlc_hybrid.o_amd64` is Broadcom proprietary. Never commit the object or a built module.
+- Offsets are specific to broadcom-sta `6.30.223.271` and this exact hash.
+- Management-frame protection is host software. It does not depend on device crypto.
+- The live record is a single tested board and AP combination, not a hardware matrix.
+- No on-air security measurement, sustained throughput result or long soak is claimed.
+- Research code. The wrapper is GPL-2.0; the object keeps Broadcom's license.
