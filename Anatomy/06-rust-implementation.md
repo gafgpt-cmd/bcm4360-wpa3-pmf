@@ -10,7 +10,7 @@ A native port is a **mac80211 driver**, not a cfg80211 driver that rebuilds mana
 | --- | --- | --- |
 | SAE, RSN, 4-way, key derivation | `wpa_supplicant` | password, PWE and private scalar stay in userspace; public SAE bytes are relayed and the kernel holds the installed keys |
 | Management frame construction and parsing | mac80211 | do not duplicate auth/assoc/action builders |
-| External SAE transport | cfg80211 `external_auth` | forward auth frames; do not interpret status |
+| SAE transport | userspace SME and mac80211 MLME | exchange authentication frames through the normal mac80211 TX/RX paths |
 | PMF (BIP, CCMP management, SA Query) | mac80211 where the kernel supports it | do not reimplement in Rust |
 | Block Ack | mac80211 | do not hand-roll ADDBA state |
 | Data crypto | mac80211 and kernel crypto | no device offload dependency |
@@ -99,27 +99,30 @@ Rules:
 
 ### Lock order
 
-Acquire top to bottom. Never reverse.
+Choose locks from each callback's execution context.
+The native driver and compatibility bridge have different locking contracts.
 
-| Order | Lock | Type | Protects |
-| --- | --- | --- | --- |
-| 1 | cfg lock | mutex | cfg80211/rtnl-facing state |
-| 2 | device lock | mutex | reset, queues, object calls |
-| 3 | state lock | spinlock | session state, epoch |
-| 4 | key lock | spinlock | IGTK, PTK, TX PN |
-| 5 | replay lock | spinlock | RX replay floors |
+| Context | Contract |
+| --- | --- |
+| Probe, configuration, reset work | Sleepable operations may use a mutex |
+| IRQ, deferred RX/TX and atomic callbacks | No sleeping; bounded critical sections with the appropriate IRQ-safe lock |
+| Compatibility object calls | Preserve the existing C seam's `WL_LOCK` rules; do not replace a spinlock with a mutex |
+| Key/replay update | Verify key generation and advance replay atomically before dispatch |
+| Stop/remove | Prevent new callbacks, synchronize existing work, then release resources |
 
 Rules:
 
 - Never take a mutex while holding a spinlock.
 - Never sleep under a spinlock.
-- Free packets and cancel work outside all locks.
-- Document any new lock in this table before adding it.
+- Do not cancel work while holding a lock its callback needs.
+- Document lock nesting for the selected implementation and verify it with lockdep.
 
 ### Epochs
 
 - Increment on connect, disconnect, reset and abort.
-- Key install brackets the epoch: even means stable, odd means installing.
+- Keep association generation separate from key publication generation.
+- A key-publication counter may use even/odd stable/installing states as in the C bridge.
+- An association-generation increment must not accidentally mark a stable key as installing.
 - Every completion captures the epoch and rechecks before applying.
 - A stale completion is dropped.
 - Use `fetch_add`; wrap is not a practical concern.
@@ -167,6 +170,9 @@ Any failure unwinds in reverse. Partial init must not leave DMA armed.
   compatibility seam.
 - Validate length, offset and version before parsing.
 - Hand management and data frames to mac80211; do not build a second dispatch tree.
+- Supply channel, signal, rate and crypto status from the actual descriptor.
+- Declare FCS inclusion consistently with the bytes handed to mac80211.
+- Never mark a frame decrypted or authenticated unless the corresponding operation succeeded.
 - Free or hand off exactly once.
 
 ## TX layer
@@ -175,29 +181,25 @@ Any failure unwinds in reverse. Partial init must not leave DMA armed.
 - Do not build the MAC header or management body in the driver.
 - Reserve crypto space only when mac80211 has not already done so.
 - Queue with the station context supplied by mac80211.
-- On failure, return the frame to mac80211 for freeing.
+- Report completion, failure, retry count and actual ACK status through the selected mac80211 TX-status interface.
+- Transfer each skb exactly once; never free it after a status handoff.
+- Queue submission is not evidence that a frame was transmitted or acknowledged.
 
 ## SAE layer
 
-mac80211 and cfg80211 already provide external-auth transport. The driver only moves frames.
+The native soft-MAC driver uses mac80211's management/SME path.
+Userspace and mac80211 handle authentication and association; the hardware driver transports frames.
+It does not implement the full-MAC `external_auth` handshake used by Mode A.
 
-Design pseudocode:
+- Pass received authentication frames through mac80211 with correct RX metadata.
+- Transmit authentication frames supplied by the stack.
+- Preserve status codes and report actual TX completion.
+- Do not generate a vendor placeholder authentication frame.
+- Do not apply Mode A's pre-START drop gate to the native RX path.
+- Do not inject association IEs through vendor object offsets.
 
-```text
-on auth frame:
-    if external_auth_started:
-        cfg80211_rx_mgmt(frame)
-    else:
-        drop
-on external_auth(status):
-    if status == 0:
-        mac80211 proceeds to association
-    else:
-        mac80211 aborts and reports failure
-```
-
-Do not reimplement SAE timers, status interpretation or association injection. Those exist in the
-Mode A C bridge only because the object bypasses mac80211.
+Mode A retains the state machine in file 04.
+Its placeholder, START timing and explicit association advancer are compatibility requirements.
 
 ## PMF layer
 
@@ -231,7 +233,8 @@ Map to kernel errno at the boundary. Do not invent positive error codes.
 
 - Raw offset access exists only in `abi.rs`, only for the compat build.
 - Each accessor checks null, documented offset and width.
-- `unsafe` outside `abi.rs` is limited to atomics and zeroization.
+- Keep native FFI, MMIO and DMA unsafety behind narrow bindings with explicit lifetime and ordering contracts.
+- Ordinary Rust atomics do not require `unsafe`.
 - Every `unsafe` block names the invariant that makes it sound.
 - A non-null pointer plus a known offset is not proof of allocation bounds or liveness.
 
@@ -244,12 +247,14 @@ Map to kernel errno at the boundary. Do not invent positive error codes.
 | 3 | RX validation rejects malformed frames | unit tests |
 | 4 | PMF vectors pass | unit tests |
 | 5 | Replay, rekey and epoch behavior correct | unit tests |
-| 6 | SAE transport forwards all post-START statuses | transport test |
+| 6 | Native management RX/TX preserves SAE frames; compat preserves all post-START statuses | transport tests for each mode |
 | 7 | No secrets in logs or files | secret scan |
 | 8 | Lock order holds under stress | lockdep |
 | 9 | No double free | fault injection |
 | 10 | Down/up and reset idempotent | repeated runs |
 | 11 | Link loss is reported, never silent | hardware test |
+
+Interface reference: [Linux mac80211 driver contracts](https://docs.kernel.org/driver-api/80211/mac80211.html).
 
 ## What this plan does not do
 

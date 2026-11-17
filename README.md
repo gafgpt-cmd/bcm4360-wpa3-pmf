@@ -8,6 +8,8 @@ It is a C compatibility layer, not a native driver. `wpa_supplicant` runs SAE an
 handshake; the kernel carries frames; host code verifies BIP and CCMP for management frames and
 answers SA Query. The vendor object still owns the MAC, rate control and aggregation.
 
+[Build](#build) · [Trial and install](#trial-and-install) · [Recovery](LOCAL.md#persistent-current-kernel-install) · [Anatomy](Anatomy/README.md)
+
 ## Status
 
 | Proven | Not claimed |
@@ -45,7 +47,7 @@ flowchart LR
     CFG --> GLUE["wl_cfg80211_hybrid.c<br/>SAE transport, PMF, SA Query"]
     GLUE <--> CRYPTO["kernel crypto<br/>AES-CMAC + ccm(aes)"]
     GLUE --> TAP["RX/TX taps<br/>wl_linux.c"]
-    TAP --> BLOB["wlc_hybrid.o_amd64<br/>hash-gated object"]
+    TAP --> BLOB["wlc_hybrid.o_amd64<br/>version-specific host object"]
     BLOB --> HW["BCM4360<br/>D11 MAC + AC-PHY"]
     HW --> TAP
 ```
