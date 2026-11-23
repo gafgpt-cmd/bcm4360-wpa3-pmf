@@ -4250,9 +4250,15 @@ wl_bss_connect_done(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 
 		WL_DBG(("Reporting BSS network join result \"%s\"\n",
 			wl->profile->ssid.SSID));
-		cfg80211_connect_result(ndev, (u8 *)&wl->bssid,	conn_info->req_ie,
-		    conn_info->req_ie_len, conn_info->resp_ie, conn_info->resp_ie_len,
-		    completed ? WLAN_STATUS_SUCCESS : WLAN_STATUS_AUTH_TIMEOUT,	GFP_KERNEL);
+		/* wl->bssid and the IEs still describe the previous AP on failure; NULL lets the
+		 * supplicant charge the BSS it actually tried. */
+		if (completed)
+			cfg80211_connect_result(ndev, (u8 *)&wl->bssid, conn_info->req_ie,
+			    conn_info->req_ie_len, conn_info->resp_ie, conn_info->resp_ie_len,
+			    WLAN_STATUS_SUCCESS, GFP_KERNEL);
+		else
+			cfg80211_connect_result(ndev, NULL, NULL, 0, NULL, 0,
+			    WLAN_STATUS_AUTH_TIMEOUT, GFP_KERNEL);
 		WL_DBG(("Connection %s\n", completed ? "Succeeded" : "FAILed"));
 	}
 

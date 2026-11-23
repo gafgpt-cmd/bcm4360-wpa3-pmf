@@ -239,6 +239,19 @@ Version-zero SAE remains delivered; unprotected robust frames remain dropped.
 The test classifier follows Linux's subtype mask and robust-category exclusions.
 The new regression fails before the guard. On-air ingress remains untested.
 
+## Stale-BSSID join failure regression
+
+Bug (stock glue): a failed join was reported with `wl->bssid`, which names the last AP that worked.
+wpa_supplicant ignore-listed that good AP, then looped on rejects (status 16) on dual-band/multi-AP networks.
+Fix: failed join reports no BSSID and no IEs; supplicant falls back to the BSS it tried
+([events.c](https://w1.fi/cgit/hostap/tree/wpa_supplicant/events.c), `assoc_reject.bssid` NULL -> `pending_bssid`).
+`python3 tests/connect.py` executes the actual `wl_bss_connect_done` with kernel stubs.
+Cases: success after join, failed join after a prior link, failed link event, SAE silent retry,
+not-connecting no-op, later success. Pre-fix source fails the failed-join case (previous AP reported).
+Module rebuilt from the pinned blob for `7.2.15-1-omarchy`: srcversion `DB2A617552D7DADC4D6D4D0`,
+SHA-256 `f334d9c72d41efc71525a0597229b728a53569090666a2974a42d618039706a9`.
+Same four known missing-prototype warnings plus two in `wl_linux.c`. Not loaded, not live tested.
+
 ## Remote source checks
 
 Revisions `ded5741` and `bdf1fac`: full test and lint commands passed on the connected CI host.
