@@ -248,9 +248,32 @@ Fix: failed join reports no BSSID and no IEs; supplicant falls back to the BSS i
 `python3 tests/connect.py` executes the actual `wl_bss_connect_done` with kernel stubs.
 Cases: success after join, failed join after a prior link, failed link event, SAE silent retry,
 not-connecting no-op, later success. Pre-fix source fails the failed-join case (previous AP reported).
-Module rebuilt from the pinned blob for `7.2.15-1-omarchy`: srcversion `DB2A617552D7DADC4D6D4D0`,
-SHA-256 `f334d9c72d41efc71525a0597229b728a53569090666a2974a42d618039706a9`.
-Same four known missing-prototype warnings plus two in `wl_linux.c`. Not loaded, not live tested.
+Module build: [PMF RX section](#pmf-rx-a-msdu-and-sa-query-station-regressions). Not live tested.
+
+## PMF RX A-MSDU and SA-Query station regressions
+
+Blob evidence (`objdump` of the pinned object): `wlc_recv` sends any buffer with `rxh[0x12] & 1`
+(RxStatus2 A-MSDU) to `wlc_recvamsdu`, before reading frame control.
+Hardware deaggregation: non-first subframes start with the subframe DA, not an 802.11 header.
+Defect: with PMF active the RX wrapper parsed them as frames. DA first byte with version bits
+(locally administered or group MAC) or a robust-looking management type was dropped.
+WPA2 skips the wrapper, so only WPA3/PMF lost those subframes.
+Fix: A-MSDU parts go straight to `wlc_recv`; the blob handles them as data only.
+This laptop's DA parses as a data frame, so the fix does not explain its 5 GHz stall.
+
+Defect 2: the SA-Query responder queued TX with a NULL station entry.
+`wl_re_mgmt_tx` documents NULL as a TX-completion hard lock. Now refused, like the generic path.
+The RX harness TX stub now asserts a station entry.
+
+`python3 tests/rx.py`: each new case fails on its pre-fix source, passes after.
+
+Candidate with the stale-BSSID and both PMF fixes, built from the pinned blob for `7.2.15-1-omarchy`:
+srcversion `B2171DED54B22864A8BEAC8`,
+SHA-256 `f6e0be3597fce53eff82766771408ba84133a0a113f9050a4a622d3ed0ff63ca`.
+Build warnings: the four known missing prototypes plus two in `wl_linux.c`.
+Full configured test and lint commands passed. Not loaded, not live tested.
+Installing over the Nov 17 candidate: `install.sh` refuses a non-stock installed module;
+run the old bundle's `revert.sh` first.
 
 ## Remote source checks
 

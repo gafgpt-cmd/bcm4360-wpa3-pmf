@@ -3066,7 +3066,7 @@ static void wl_re_saq_work(struct work_struct *w)
 		resp[28] = rpn[2]; resp[29] = rpn[3]; resp[30] = rpn[4]; resp[31] = rpn[5];
 		memcpy(resp + 32, pt, 12);   /* ct(4) + MIC(8) */
 		scb = wl_re_find_scb(wl_sae.dev, wl_sae.bssid);   /* fresh scb (survives reconnect) */
-		rc = wl_re_mgmt_tx(wl_sae.dev, resp, 44, scb);
+		rc = scb ? wl_re_mgmt_tx(wl_sae.dev, resp, 44, scb) : -ENOENT;   /* NULL scb hard-locks TX completion */
 		re_log("re saq: SENT SA-Query Response transid=%02x%02x pn=%llu -> %d\n",
 		       body[2], body[3], (unsigned long long)txpn, rc);
 	}
@@ -3330,6 +3330,10 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 {
 	struct sk_buff *skb = (struct sk_buff *)pkt;
 	u32 frame_off = 0;
+	/* A-MSDU part (RxStatus2 bit 0): wlc_recv hands it only to wlc_recvamsdu, as data. Non-first
+	 * subframes carry no 802.11 header, so the checks below would read payload as frame control. */
+	if (skb && skb_headlen(skb) == skb->len && skb->len > 0x13 && (skb->data[0x12] & 1))
+		goto pass;
 	if ((wl_sae.armed || READ_ONCE(wl_sae.pmf_active)) && skb) {
 		int offset;
 		if (skb_headlen(skb) != skb->len || skb->len < 20)

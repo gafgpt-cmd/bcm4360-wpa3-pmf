@@ -180,9 +180,11 @@ static int wl_re_ccm(const u8 *nonce, const u8 *aad, unsigned int aadlen, u8 *da
 { (void)nonce; (void)aad; (void)aadlen; (void)data; (void)len; responses++; return 0; }
 static int wl_re_tx_prot_locked(struct net_device *dev, u8 fc0, const u8 *body, unsigned int len)
 { (void)dev; (void)fc0; (void)body; (void)len; responses++; return 0; }
-static void *wl_re_find_scb(struct net_device *dev, const u8 *mac) { (void)dev; (void)mac; return NULL; }
+static bool scb_present;
+static int scb_token;
+static void *wl_re_find_scb(struct net_device *dev, const u8 *mac) { (void)dev; (void)mac; return scb_present ? &scb_token : NULL; }
 static int wl_re_mgmt_tx(struct net_device *dev, const u8 *f, int len, void *scb)
-{ (void)dev; (void)scb; assert(len == 44); memcpy(last_response, f, 44); return 0; }
+{ (void)dev; assert(scb && len == 44); memcpy(last_response, f, 44); return 0; }
 static void get_random_bytes(void *out, size_t len) { memset(out, 0x56, len); }
 static void wl_re_saq_send(struct net_device *dev)
 { (void)dev; wl_sae.saq_tries++; inject(&during_probe); }
@@ -263,6 +265,7 @@ static void reset(void)
     passed = dropped = disconnected = responses = auth_delivered = 0;
     auth_requests = 0; auth_request_error = 0;
     dev.ieee80211_ptr = NULL;
+    scb_present = true;
     priv.status = 1;
     during_setup = during_probe = during_decrypt = NULL;
     memset(wl_bip_keys, 0, sizeof(wl_bip_keys));
@@ -493,6 +496,31 @@ int main(void)
         __wrap_wlc_recv(wlc, &packet);
         printf("SAE phase %u status %u: delivered=%u expected=%u\n", phase, statuses[i], auth_delivered, phase);
         failures += auth_delivered != phase || passed != 0 || dropped != 1;
+      }
+    }
+    /* SA-Query Request while the AP's station entry is gone: never queue TX without one */
+    const u8 saq_req[] = { 8, 0, 0x21, 0x43 };
+    reset(); scb_present = false;
+    memset(last_response, 0, sizeof(last_response));
+    receive(0xd0, 10, saq_req, sizeof(saq_req), false);
+    assert(wl_sae.saq_work.queued);
+    wl_sae.saq_work.queued = false; wl_re_saq_work(&wl_sae.saq_work);
+    assert(last_response[0] == 0 && !wl_sae.saq_busy);
+    /* Non-first A-MSDU subframes start with the subframe DA, not frame control */
+    const u8 *das[] = { dev.dev_addr, (const u8 []){ 0xc0, 0, 0, 0, 1, 0 } };
+    for (unsigned int amsdu = 0; amsdu < 2; amsdu++) {
+      for (unsigned int i = 0; i < 2; i++) {
+        reset();
+        memset(storage, 0, sizeof(storage));
+        storage[0x12] = (u8)amsdu;
+        u8 *f = storage + 20;
+        memcpy(f, das[i], 6); memcpy(f + 6, ap, 6);
+        f[12] = 0; f[13] = 40;
+        memset(f + 14, 0xaa, 40);
+        packet.len = 20 + 54;
+        __wrap_wlc_recv(wlc, &packet);
+        printf("A-MSDU flag %u, subframe DA[0]=%02x: passed=%u dropped=%u\n", amsdu, das[i][0], passed, dropped);
+        failures += amsdu ? passed != 1 || dropped : passed != 0 || dropped != 1;
       }
     }
     if (failures) return 1;
