@@ -2,8 +2,17 @@ name: checks
 on: [push, pull_request]
 jobs:
   check:
-    runs-on: [self-hosted, workstation]
+    # Public repository: pull-request code runs here, never on a fleet machine.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: gitleaks (not on the runner image)
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$version/gitleaks_${version}_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C /usr/local/bin gitleaks
       - run: bash tests/check.sh
       - run: shellcheck recovery/*.sh dkms/*.sh tests/check.sh && gitleaks dir --redact --no-banner .
