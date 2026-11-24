@@ -6,4 +6,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash tests/check.sh
-      - run: shellcheck recovery/*.sh tests/check.sh && gitleaks dir --redact --no-banner .
+      - run: shellcheck recovery/*.sh dkms/*.sh tests/check.sh && gitleaks dir --redact --no-banner .

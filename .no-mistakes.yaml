@@ -1,3 +1,3 @@
 commands:
   test: bash tests/check.sh
-  lint: shellcheck recovery/*.sh tests/check.sh && gitleaks dir --redact --no-banner .
+  lint: shellcheck recovery/*.sh dkms/*.sh tests/check.sh && gitleaks dir --redact --no-banner .

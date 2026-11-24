@@ -116,12 +116,14 @@ kernel before preparing a trial bundle. The current candidate targets `7.2.15-1-
 - Temporary, reversible trial: [LOCAL.md](LOCAL.md#temporary-trial-bundle)
 - Persistent current-kernel install with saved-module rollback:
   [LOCAL.md](LOCAL.md#persistent-current-kernel-install)
+- DKMS install, rebuilt for every kernel update: [dkms/README.md](dkms/README.md)
 
 Both paths keep Wi-Fi profiles and router settings unchanged until the user runs the elevated step.
 The temporary trial leaves the installed module file untouched; a reboot restores the stock module.
 The persistent current-kernel install replaces the installed module file, so the replacement
 survives reboot. `revert.sh` restores the saved file and the running stock module. A kernel or
 package update may replace the candidate with stock; rebuild and reinstall for the exact kernel.
+The DKMS install survives kernel updates; undo it with `dkms/install.sh --remove`, not `revert.sh`.
 
 ## Compatibility
 

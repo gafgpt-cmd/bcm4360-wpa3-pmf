@@ -5,7 +5,10 @@
 set -e
 ORIG=lib/wlc_hybrid.o_amd64.orig
 BLOB=lib/wlc_hybrid.o_amd64
+# offsets in patches/ are valid for this exact blob only
+SHA256=352a6e349f74c69b78e76f68c63752c99b8f6b22dc942af531b754211d7f4743
 [ -f "$ORIG" ] || { echo "missing $ORIG (pristine Broadcom blob)"; exit 1; }
+echo "$SHA256  $ORIG" | sha256sum -c --quiet - || { echo "$ORIG is not the pristine 6.30.223.271 blob"; exit 1; }
 
 cp "$ORIG" "$BLOB"
 python3 patches/wl_patch.py "$BLOB" --apply

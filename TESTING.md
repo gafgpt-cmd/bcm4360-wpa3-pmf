@@ -275,6 +275,27 @@ Full configured test and lint commands passed. Not loaded, not live tested.
 Installing over the Nov 17 candidate: `install.sh` refuses a non-stock installed module;
 run the old bundle's `revert.sh` first.
 
+## DKMS persistence
+
+Package `wl-wpa3/1.2`, staged with `dkms/install.sh --stage`, blob from `broadcom-wl-dkms`.
+Non-root `dkms add/build` into a scratch dkmstree, signing off. PRE_BUILD ran; builds passed:
+
+| Kernel | Result |
+| --- | --- |
+| `7.2.15-4-omarchy` | vermagic `7.2.15-4-omarchy SMP preempt mod_unload`, srcversion `B2171DED54B22864A8BEAC8` |
+| `7.2.15-1-omarchy` | built, same sources |
+
+- srcversion equals the PMF RX candidate above: same sources.
+- `__wrap_wlc_{sendauth,authresp_client,recv,sendmgmt}` and `re_auth_advance` (0x5b79d) defined.
+- `.text` relocs to wraps: sendauth 3, authresp_client 1, recv 1, sendmgmt 17. Same as hand-built candidate.
+- P1 patched context 1, pristine 0.
+- Stale-BSSID fix compiled in: `wl_bss_connect_done` calls separate success/failure `cfg80211_connect_bss` clones (3 clones; pre-fix module 2).
+- Stock tree + `BUILD_EXCLUSIVE_KERNEL="^$"`: `dkms build` exits 77 "should not be built"; `dkms remove` still works.
+- `python3 tests/dkms.py`: install ordering, rerun, `--remove`, build failure, foreign override, refusals, stage.
+  Mutations (stock purged before build; no `--force`) fail it.
+
+Not installed as root, not loaded, not live tested.
+
 ## Remote source checks
 
 Revisions `ded5741` and `bdf1fac`: full test and lint commands passed on the connected CI host.

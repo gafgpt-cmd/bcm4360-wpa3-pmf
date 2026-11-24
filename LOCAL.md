@@ -11,7 +11,7 @@ Needs: C compiler, OpenSSL development files, pkg-config, Python 3, ShellCheck, 
 
 ```bash
 bash tests/check.sh
-shellcheck recovery/*.sh tests/check.sh
+shellcheck recovery/*.sh dkms/*.sh tests/check.sh
 gitleaks dir --redact --no-banner .
 ```
 
@@ -24,6 +24,8 @@ Build requirements and commands: [README.md](README.md#build).
 
 Installs the already-built candidate for the running exact kernel.
 No DKMS: a kernel or package update may replace it with stock; rebuild and reinstall.
+Survives kernel updates instead: [dkms/README.md](dkms/README.md). After it, undo with
+`dkms/install.sh --remove`, not this `revert.sh`.
 
 Bundle adds:
 

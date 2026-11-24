@@ -11,3 +11,4 @@ if [[ -f tests/recovery.py ]]; then
   python3 tests/recovery.py
 fi
 python3 tests/install.py
+python3 tests/dkms.py
